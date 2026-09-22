@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学单题快速入库"
+  short_description: "完整保真事实包；教学与正式写入各走本科入口。"
+  default_prompt: "使用 $kaoyan-math-wrong-intake，以一次固定保存命令保留当前题完整原话、图片和已展示卷面，返回本次回执。"

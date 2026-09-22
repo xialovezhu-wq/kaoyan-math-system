@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学当前单题学习"
+  short_description: "先讲题面线索、隐含条件与方法用途；个人依据内部使用，保留答案保护。"
+  default_prompt: "使用 $kaoyan-math-question-worker，在当前模型中查询或复用个人摘要但不展示概况；根据题面与真实作答先讲线索、隐含条件和本题用途，具体计算按请求展开。"

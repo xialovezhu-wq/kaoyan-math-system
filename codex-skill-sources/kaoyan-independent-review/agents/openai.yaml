@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学独立复盘"
+  short_description: "数学B包本地学习，封存原始证据交GPT-6正式审核与C交接。"
+  default_prompt: "使用 $kaoyan-independent-review 学习本数学B复盘包，30分钟内结束并保存完整原始证据。"

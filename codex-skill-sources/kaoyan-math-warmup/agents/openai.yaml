@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学学习前旧题"
+  short_description: "预处理晨间真实旧题；逐题快速讲解与完整Capture，晚间统一正式处理。"
+  default_prompt: "Use $kaoyan-math-warmup to prepare eligible old questions, then reuse question-worker and wrong-intake for each actual answer; save complete Capture evidence and leave formal scoring and scheduling to later formal intake."

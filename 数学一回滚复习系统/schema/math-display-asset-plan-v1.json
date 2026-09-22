@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "math-display-asset-plan-v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "subject",
+    "source_manifest_path",
+    "source_manifest_sha256",
+    "package_id",
+    "formal_ids",
+    "assets",
+    "cards",
+    "plan_id",
+    "plan_sha256",
+    "authorization"
+  ],
+  "properties": {
+    "schema_version": {"const": "math-display-asset-plan-v1"},
+    "subject": {"const": "math"},
+    "source_manifest_path": {"type": "string", "minLength": 1},
+    "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "package_id": {"type": "string", "minLength": 1},
+    "package_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "formal_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^(GS|LA|PR)-[0-9]{3,}$"}
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "formal_id",
+          "attachment_role",
+          "package_relative_path",
+          "media_type",
+          "size",
+          "source_sha256",
+          "visibility",
+          "disposition",
+          "stable_vault_relative_path"
+        ],
+        "properties": {
+          "visibility": {"enum": ["practice_safe", "protected"]},
+          "disposition": {"enum": ["promoted", "already_stable", "archive_only", "no_display"]},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "stable_vault_relative_path": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "cards": {"type": "array"},
+    "plan_id": {"type": "string", "pattern": "^MATH-DISPLAY-PLAN-[0-9a-f]{24}$"},
+    "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "authorization": {"type": "string", "pattern": "^MATH-DISPLAY-ASSET-APPLY-[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

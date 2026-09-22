@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学可视化复盘"
+  short_description: "真实最新证据形成一份复盘；文档不等于作答。"
+  default_prompt: "Use $kaoyan-math-visual-review for one source-backed review artifact. Explicit artifact creation includes one safe project-local subdirectory. Do not infer completion from a B document or write formal mastery. Actual question teaching keeps the one best exam method, latest related formal evidence, answer timing and separate Astra low complete 30/40-second contract."

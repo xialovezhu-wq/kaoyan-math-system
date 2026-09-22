@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学正式入库与原始包归档"
+  short_description: "原日期与唯一writer；最新个人资料及可恢复发布。"
+  default_prompt: "Use $kaoyan-math-nightly-qa for the authorized cumulative or exact set. Keep one serial formal writer, native root-directed read delegation, original dates, stable assets, Wiki/teaching-context gates and verified T9 archive. Preserve one reliable exam solution representation. Resume only missing postcommit refresh/publication or archive work after commit; do not replay formal writes or downgrade engineering to the tutoring-low task."

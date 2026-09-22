@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学弱边审计"
+  short_description: "精确证据与SHADOW提案；保留逐项裁决。"
+  default_prompt: "Use $kaoyan-math-weak-edge-audit only for named pairs or the bounded weak-edge backlog. Read exact current formal evidence, keep SHADOW proposal-only and stop at the user-requested decision directory. Do not add mandatory MCP or fixed readers. Concrete tutoring routes to question-worker with the single reliable exam mainline and separate Astra low complete 30/40-second contract."

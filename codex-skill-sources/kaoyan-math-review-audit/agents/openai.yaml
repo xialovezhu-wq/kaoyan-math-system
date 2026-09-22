@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学 B 复盘审核与 C 交接"
+  short_description: "GPT-6 读完整 B 证据，正式更新知识点并门控生成 C 包"
+  default_prompt: "Use $kaoyan-math-review-audit to audit the linked completed project-B math task from its verified raw evidence, update the existing concept-review and learning-profile writers exactly once, and return the C handoff only after publication is current."

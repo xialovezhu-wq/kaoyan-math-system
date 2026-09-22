@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学A知识板块分包"
+  short_description: "按知识主题和体量拆分完整快速包，供网页并发增强，保留共同快照。"
+  default_prompt: "使用 $kaoyan-math-web-bundle 把今天待处理的数学快速包按知识板块拆成多个网页A输入ZIP。"

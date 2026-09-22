@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "math-display-asset-closure-receipt-v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "subject",
+    "plan_id",
+    "plan_sha256",
+    "package_id",
+    "source_manifest_path",
+    "source_manifest_sha256",
+    "formal_ids",
+    "assets",
+    "markdown_surfaces",
+    "stable_asset_count",
+    "no_display_proof",
+    "formal_reference_scan_sha256",
+    "pending_component",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "math-display-asset-closure-receipt-v1"},
+    "receipt_id": {"type": "string", "pattern": "^MATH-DISPLAY-CLOSE-[0-9a-f]{24}$"},
+    "subject": {"const": "math"},
+    "formal_ids": {"type": "array", "uniqueItems": true},
+    "stable_asset_count": {"type": "integer", "minimum": 0},
+    "no_display_proof": {"type": "boolean"},
+    "formal_reference_scan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "pending_component": {"type": "null"},
+    "status": {"const": "verified"}
+  },
+  "additionalProperties": true
+}

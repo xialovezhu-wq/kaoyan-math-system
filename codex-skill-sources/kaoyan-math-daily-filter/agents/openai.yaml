@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学学习后筛题"
+  short_description: "已完成ID、最新实际活动与七天外真实旧题。"
+  default_prompt: "Use $kaoyan-math-daily-filter after explicit completed IDs. Run the canonical repository recommender, verify current formal evidence and actual delivered-card activity, and preserve exact-gap versus knowledge-fallback labels. Do not write or generate questions. Subsequent teaching follows question-worker and its latest personal-context, single exam-mainline and separate Astra low 30/40-second contract."

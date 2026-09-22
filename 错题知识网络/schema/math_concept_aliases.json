@@ -1,0 +1,13 @@
+{
+  "schema_version": "math-concept-aliases-v1",
+  "aliases": {
+    "泰勒展开": [
+      "泰勒公式"
+    ]
+  },
+  "card_concepts": {},
+  "scope_notes": {
+    "public_export": "Only a synthetic alias example; populate mappings from your own authorized library."
+  },
+  "require_scope_check": []
+}

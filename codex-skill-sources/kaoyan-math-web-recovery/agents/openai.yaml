@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学网页任务续接"
+  short_description: "保全A/B/C网页已完成成果，修复实际失败并续接原业务。"
+  default_prompt: "使用 $kaoyan-math-web-recovery 从这份数学网页进度包继续任务，保留已完成成果并补齐剩余部分。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "数学A增强包正式接收"
+  short_description: "接收网页完成的题卡与知识点成稿，正式写入并刷新个人摘要。"
+  default_prompt: "使用 $kaoyan-math-enhancement-intake 处理给定A数学增强包，按原正式流程写入并更新个人查询。"

@@ -80,3 +80,13 @@ kaoyan_math_project_v2/
 错题知识网络/*
 !错题知识网络/scripts/
 !错题知识网络/schema/
+
+# Local provider credentials must never be committed.
+*.secret
+**/auth.json
+**/credentials.json
+**/api-key
+**/api_key
+**/caller-secret
+**/internal-secret
+**/cursor-public-secret

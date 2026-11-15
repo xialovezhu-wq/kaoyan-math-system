@@ -1171,6 +1171,8 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--formal-id", help="Optional exact-card history route; new questions use --concept")
     resolve.add_argument('--source-question-id', help='Exact printed source ID; zero match is a new source')
     resolve.add_argument('--known-version', help='Reuse this same-question response when unchanged')
+    resolve.add_argument('--audit-context', action='store_true',
+                         help='Describe the exact bounded stdout JSON on stderr (isolated evaluation)')
     resolve.add_argument('--full-evidence', action='store_true', help='Explicit maintenance/history read, outside normal teaching')
     resolve.add_argument("--concept", action="append", dest="concepts",
                          help="Knowledge label, alias or stable key extracted from the current problem; repeat for multiple concepts")
@@ -1194,7 +1196,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    audit = args.command == "resolve" and args.audit_context
+    if audit:
+        if args.full_evidence:
+            parser.error("--audit-context requires the bounded resolve path")
+        from math_teaching_delivery import emit_audit, perf_counter_ns
+        began_ns = perf_counter_ns()
     try:
         if args.command == "materialize":
             result = materialize_context(args.repo, _load_input(Path(args.input)))
@@ -1232,7 +1241,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = {"schema_version": "math-teaching-context-error-v1", "status": "unavailable",
                   "reason_code": "personal_context_unavailable", "reason": str(exc)}
         code = 2
-    if args.command == "resolve" and args.concepts:
+    if audit:
+        emit_audit(result, args=args, began_ns=began_ns, exit_status=code)
+    elif args.command == "resolve" and args.concepts:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     else:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))

@@ -570,6 +570,8 @@ def resolve(repo_root, concepts, view='protected', max_bytes=4500, known_version
             identity={'kind':'formal_card','formal_id':formal_id,'card_path':card}
             detail=sorted((root/'错题知识网络/assets/visual_wrong_questions'/formal_id).glob('question_*'))
             identity['question_images']=[str(p.relative_to(root)) for p in detail if p.is_file()]
+        if view == 'protected' and identity:
+            identity.pop('card_path', None)
         keys=[];unknown=[];ambiguous=[];suggestions={}
         bad={native.normalize(x['alias']) for x in meta.get('alias_problems',[])}
         for q in concepts:
@@ -588,8 +590,6 @@ def resolve(repo_root, concepts, view='protected', max_bytes=4500, known_version
         base={'status':'available','version':query_version,'source_version':meta['version'], 'identity':identity,
               'unknown':unknown,'ambiguous':ambiguous,'view':view,'records':[]}
         if suggestions:base['suggestions']=suggestions
-        if known_version==query_version:
-            return {**base,'status':'unchanged'}
         scope=meta.get('scope_notes',{})
         base['scope_notes']={q:scope[q] for q in concepts if q in scope}
         total=0
@@ -608,6 +608,11 @@ def resolve(repo_root, concepts, view='protected', max_bytes=4500, known_version
         base.update(total=len(keys),returned=len(base['records']),truncated=len(base['records'])<len(keys))
         if not base['records']:
             base['status']='budget_too_small' if total else 'unknown_concept' if not keys else 'index_missing'
+        if known_version == query_version:
+            from math_teaching_delivery import has_delivery_gap
+            if not has_delivery_gap(base):
+                return {**{key: base[key] for key in ('version', 'source_version', 'identity', 'view')},
+                        'status': 'unchanged', 'records': []}
         return base
 
 

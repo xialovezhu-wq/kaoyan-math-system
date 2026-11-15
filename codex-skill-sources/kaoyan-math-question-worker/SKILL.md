@@ -19,7 +19,9 @@ python3 错题知识网络/scripts/math_teaching_context.py --repo /Users/your-u
 
 旧题可在同一调用追加 `--formal-id GS-xxx`；仅有原印刷题号用 `--source-question-id 原题号`。返回 identity 的 question_images 为真实原图位置；必要时读取这些图，不用摘要重建题面。初次接题同时记住当前日志身份、起始消息位置、题号、附件角色和已展示卷面的位置，供保存入口复用。
 
-未作答或明确保护答案用 `--view protected`；允许历史具体操作线索且已作答用 after_attempt；明确直接讲解/答案用 direct。一次返回的 records 是已经生成的讲题摘要，不再加载全量原始学习史。仅在同题出现资料更新信号时，用相同查询加 `--known-version 上次version`；unchanged 直接复用，版本变更使用新摘要。切换知识点/题目时重新查询对应点，不能沿用上一题历史。
+未作答或明确保护答案用 `--view protected`；允许历史具体操作线索且已作答用 after_attempt；明确直接讲解/答案用 direct。一次返回的 records 是已经生成的讲题摘要，不再加载全量原始学习史。只有实际持有同题同范围的完整正文时才用相同查询加 `--known-version 上次version`；若再次返回正文与缺项，按部分读取处理。切换知识点或题目时查询对应点。
+
+仅在开发验收时同次追加 `--audit-context`，按[证据送达回执](references/context-delivery.md)分开读取正文与回执；该参数不改变答案权限。
 
 个人摘要照常查询或复用，只作为内部教学依据，不主动展示个人概况、历史条数、日期、审核状态或历史题链接。用户明确询问个人历史时再按证据回答。semantic_stale 不沿用旧掌握判断；evidence_digest_only 只视为证据整理，不能视为已完成跨事件语义审核。关联题标签不证明同错，助手讲解/提示后复述不等于独立掌握。
 

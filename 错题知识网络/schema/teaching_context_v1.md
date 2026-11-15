@@ -126,3 +126,9 @@ python3 错题知识网络/scripts/math_teaching_context.py --repo . verify --fo
 ```
 
 `resolve` 在缺失、漂移或损坏时返回 `status=unavailable`，不会扩大读取范围。`verify` 返回严格校验结果。物化回执包含 `formal_id`、`context_path`、`context_sha256`、`pointer_path` 和 `pointer_sha256`，供正式 closeout 门禁绑定。
+
+### 有界教学验收（可选）
+
+对普通有界 `resolve` 追加 `--audit-context`，不能与 `--full-evidence` 同用。stdout 是该次实际返回的 UTF-8 JSON；stderr 给出 `math-teaching-delivery-v1` 回执，记录请求范围 SHA、访问视图、读到的版本、耗时、状态、输出字节与 SHA（不计末尾换行），以及已返回证据的 JSON Pointer。没有正文的 `unchanged` 不记作再次送达。回执本身不含题面、用户引文或文件路径；protected 不列证据指针。文件留档和语义验收由离线过程负责。
+
+同版结果仍有缺项时不返回 `unchanged`。保护模式中的精确题卡身份返回中不含题卡文件名，因为题名可能带解法或结果。

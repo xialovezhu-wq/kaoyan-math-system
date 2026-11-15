@@ -1,0 +1,444 @@
+diff --git a/codex-skill-sources/kaoyan-math-question-worker/references/teaching-turn.md b/codex-skill-sources/kaoyan-math-question-worker/references/teaching-turn.md
+index 9855ab1..60536d1 100644
+--- a/codex-skill-sources/kaoyan-math-question-worker/references/teaching-turn.md
++++ b/codex-skill-sources/kaoyan-math-question-worker/references/teaching-turn.md
+@@ -20,4 +20,6 @@
+ 当 `material_status=combined_context_omitted_for_budget` 时，仍可核对该点完整的 `short_summary` 和 `next_check`。方法、选填技巧或步骤证据如果没有正文，当前未加载；确实要用时按 `required_min_bytes` 同题、同操作、同视图补读一次。 `step_evidence_omitted_count`、`progress_omitted` 和 `personal_fields_withheld` 分别说明预算省略或视图限制，均不能当成没有学习。 `after_attempt` 的步骤原话和声明引文另受视图保护；需要完整证据时按实际授权和精确范围读取。
+ 
++只在持有同题同断点的完整可用正文时传 `--known-version`；相同版本若再次返回正文和缺项，仍按部分读取处理。开发验收可在同一条 `resolve` 命令加 `--audit-context`：stdout 是实际教学生效的有界 JSON，stderr 是字节数、哈希、耗时及指向该 JSON 的证据位置。普通教学不用此参数，不存审计日志；受保护视图不得据回执扩读。
++
+ 先保留本轮正确前缀，然后仅补最早缺口。讲时把本题一条线索落在一个条件检查和一个操作上，以一个能抓到此处错误的检查收尾。未确定是否做过的步骤按“本轮尚未验证”处理。必要拓展只用有明确纲内映射、条件与来源已核，且会改变本步选择或验算的结论。不把篇章列表、摘要和四个角色机械写成用户必读栏目。
+ 
+diff --git a/tests/test_math_learning_profiles.py b/tests/test_math_learning_profiles.py
+index 09ec7eb..0584e32 100644
+--- a/tests/test_math_learning_profiles.py
++++ b/tests/test_math_learning_profiles.py
+@@ -86,4 +86,15 @@ mastery_history: []
+         self.assertFalse(missing.exists())
+ 
++    def test_protected_stale_read_does_not_expose_the_changed_card_filename(self):
++        card = self.cards[0]
++        # A content edit changes the selected file, but not the parent directory's membership.
++        card.write_text(card.read_text() + '\nEdited outside of publication.\n')
++        args = (self.root, [index.concept_key('知识点1')])
++        protected = profiles.resolve(*args, view='protected')
++        diagnostic = profiles.resolve(*args, view='direct')
++        self.assertEqual('selected_sources_changed', protected['reason'])
++        self.assertNotIn(card.name, profiles.canonical(protected))
++        self.assertIn(str(card.relative_to(self.root)), diagnostic['changed_sources'])
++
+     def test_request_source_lookup_deduplicates_index_reads_but_rechecks_live_files(self):
+         ref = {'path': str(self.cards[0].relative_to(self.root)),
+diff --git a/tests/test_math_memory_reader.py b/tests/test_math_memory_reader.py
+index e7c6324..8354f12 100644
+--- a/tests/test_math_memory_reader.py
++++ b/tests/test_math_memory_reader.py
+@@ -330,4 +330,14 @@ class UnifiedReadTests(unittest.TestCase):
+             self.assertNotEqual('unchanged', changed['status'])
+ 
++    def test_utterance_from_a_different_generation_cannot_bind_history(self):
++        prior = {'status': 'available', 'selection_status': 'matched', 'native_version': 'previous-generation',
++                 'records': [{'quote': 'STALE-FIXTURE-QUOTE'}],
++                 'original_bindings': [{'concept_key': self.key, 'kind': 'teaching_preference'}]}
++        with patch.object(memory, '_utterance_lookup', return_value=prior):
++            result = memory.resolve(self.root, ['零空间'], 'after_attempt')
++        self.assertEqual('stale', result['memory_context']['utterance_lookup']['status'])
++        self.assertNotIn('STALE-FIXTURE-QUOTE', memory.canonical(result))
++        self.assertEqual('native-generation', result['source_version'])
++
+     def test_correction_invalidates_only_personal_summary_not_valid_preferences_or_material(self):
+         self.lifecycle['invalidated_concept_keys'] = [self.key]
+@@ -601,4 +611,7 @@ class UnifiedReadTests(unittest.TestCase):
+                 self.assertNotIn('memory_context', value)
+                 self.assertLessEqual(len(memory.canonical(value).encode()), budget)
++                retried = memory.resolve(self.root, ['零空间'], 'after_attempt', budget,
++                                         include_pending=True, known_version=value['version'])
++                self.assertEqual(value, retried)
+ 
+ 
+diff --git a/tests/test_math_teaching_delivery.py b/tests/test_math_teaching_delivery.py
+new file mode 100644
+index 0000000..f660af6
+--- /dev/null
++++ b/tests/test_math_teaching_delivery.py
+@@ -0,0 +1,63 @@
++import contextlib
++import hashlib
++import io
++import json
++from pathlib import Path
++import sys
++from time import perf_counter_ns
++from types import SimpleNamespace
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "错题知识网络/scripts"))
++from math_teaching_delivery import emit_audit, has_delivery_gap
++
++
++class DeliveryTests(unittest.TestCase):
++    def emit(self, document, **kwargs):
++        supplied = {"view": document["view"], "max_bytes": 12000, **kwargs}
++        with contextlib.redirect_stdout(io.StringIO()) as body, contextlib.redirect_stderr(io.StringIO()) as receipt:
++            emit_audit(document, args=SimpleNamespace(**supplied), began_ns=perf_counter_ns(), exit_status=0)
++        output = body.getvalue().removesuffix("\n").encode("utf-8")
++        audit = json.loads(receipt.getvalue())
++        self.assertEqual(document, json.loads(output))
++        self.assertEqual(len(output), audit["stdout_utf8_bytes"])
++        self.assertEqual(hashlib.sha256(output).hexdigest(), audit["stdout_sha256"])
++        return audit
++
++    def test_receipt_points_only_to_delivered_evidence_and_does_not_copy_text(self):
++        document = {"status": "available", "view": "after_attempt", "source_version": "fixture",
++                    "records": [{"status": "semantic_current", "short_summary": "合成内容",
++                                 "step_evidence": [{"scope": "完整适用条件。"}]},
++                                {"status": "semantic_stale", "short_summary": "过期判断"}],
++                    "memory_context": {"pending_evidence": {"status": "budget_too_small", "records": []}}}
++        audit = self.emit(document, query="不可复制的查询")
++        pts = audit["delivered_json_pointers"]
++        self.assertEqual(["/records/0/short_summary"], pts["short_summary"])
++        self.assertEqual(["/records/0/step_evidence/0"], pts["step_evidence"])
++        self.assertNotIn("records", pts)
++        self.assertEqual("full_delivery_not_established", audit["body_state"])
++        self.assertNotIn("合成内容", str(audit))
++        self.assertNotIn("不可复制的查询", str(audit))
++
++    def test_protected_and_cache_hit_have_no_evidence_pointers(self):
++        doc = {"status": "available", "view": "protected",
++               "records": [{"concept_name": "题面对象"}]}
++        audit = self.emit(doc, operation="当前小问")
++        self.assertEqual({}, audit["delivered_json_pointers"])
++        other = self.emit(doc, operation="不同小问")
++        self.assertNotEqual(audit["scope_sha256"], other["scope_sha256"])
++        hit = self.emit({"status": "unchanged", "view": "after_attempt", "records": []})
++        self.assertEqual("cached_body_not_returned", hit["body_state"])
++        self.assertEqual({}, hit["delivered_json_pointers"])
++
++    def test_public_status_keeps_budget_gaps_separate_from_view_withholding(self):
++        doc = {"status": "available", "view": "after_attempt",
++               "records": [{"status": "semantic_current", "personal_fields_withheld": ["step_evidence.source_refs"]}]}
++        self.assertFalse(has_delivery_gap(doc))
++        self.assertTrue(has_delivery_gap({**doc, "truncated": True}))
++        receipt = self.emit(doc, max_bytes=10)
++        self.assertFalse(receipt["within_budget"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/错题知识网络/schema/math_memory_v1.md b/错题知识网络/schema/math_memory_v1.md
+index e6d0e0b..665828a 100644
+--- a/错题知识网络/schema/math_memory_v1.md
++++ b/错题知识网络/schema/math_memory_v1.md
+@@ -75,4 +75,8 @@ A 外发分包在原计划和 stage 回执上运行 `inspect-contributions`，
+ 同题、同断点、同视图及相同有关版本才可复用。切换题目、操作、保护级别或收到相关更新时重新读取；历史查询不能带入当前专有信息。
+ 
++部分命中、预算整块省略或来源失效时，重复提交同一 `known_version` 不返回 `unchanged`。原话索引的候选、来源绑定及原生内容须属于同一索引代；读到不同代时丢弃原话候选及句柄，并标为 stale。
++
++隔离验收在现有有界 `resolve` 上加 `--audit-context`（不可与 `--full-evidence` 同用）。stdout 是该次读取的 UTF-8 JSON；stderr 的 `math-teaching-delivery-v1` 记录请求范围指纹、视图、源版本、实际响应哈希和字节数（不计末尾换行）、有界查询耗时和送达字段的 JSON Pointer。回执不回显查询文本、原话、文件路径或完整响应；它也不为任何字段背书。已省略的正文不计送达，`unchanged` 不计作新返回材料。受保护回执不列证据指针。正文留在该请求允许的范围内，开发回放可私有留档，日常不写记录。
++
+ ## 保护与来源
+ 
+diff --git a/错题知识网络/scripts/math_learning_profiles.py b/错题知识网络/scripts/math_learning_profiles.py
+index 111decf..cf19495 100644
+--- a/错题知识网络/scripts/math_learning_profiles.py
++++ b/错题知识网络/scripts/math_learning_profiles.py
+@@ -1839,6 +1839,8 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
+         freshness = math_memory_projection.check_query_dependencies(root, conn, keys)
+         if freshness['changed_sources']:
+-            return {'status':'stale','reason':'selected_sources_changed','records':[],
+-                    'changed_sources':freshness['changed_sources']}
++            stale = {'status': 'stale', 'reason': 'selected_sources_changed', 'records': []}
++            if view != 'protected':
++                stale['changed_sources'] = freshness['changed_sources']
++            return stale
+         exam_changed = sorted(set(exam_changed + freshness['exam_changed']))
+         rows = []
+@@ -1940,7 +1942,4 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
+                 'requires_scope_check': bool(recovery),
+                 'policy': '候选摘要已读取；按当前题对象与操作核对后使用。相似名称不证明同一细点或本轮复发，父主题考次不冒充细点考次。'}
+-        if (known_version==query_version and all(row['status'] == 'available' for row in method_states)
+-                and not any(row.get('exam_context', {}).get('status') == 'stale' for row in rows)):
+-            return {**base,'status':'unchanged'}
+         if view!='protected':
+             base['exam_frequency']=frequency_brief
+@@ -2031,4 +2030,10 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
+                     'required_fields':['exam_frequency','choice_fill_guidance','personal_summary'],
+                     'retry_scope':'same_identity_concepts_and_view_with_required_budget'}
++        if (known_version == query_version and all(row['status'] == 'available' for row in method_states)
++                and not any(row.get('exam_context', {}).get('status') == 'stale' for row in rows)):
++            from math_teaching_delivery import has_delivery_gap
++            if not has_delivery_gap(base):
++                return {**{key: base[key] for key in ('version', 'source_version', 'identity', 'view') if key in base},
++                        'status': 'unchanged', 'records': []}
+         return base
+ 
+diff --git a/错题知识网络/scripts/math_memory_context.py b/错题知识网络/scripts/math_memory_context.py
+index a81f859..8d603b5 100644
+--- a/错题知识网络/scripts/math_memory_context.py
++++ b/错题知识网络/scripts/math_memory_context.py
+@@ -280,5 +280,5 @@ def _claim_context(root, keys, view, valid_at, known_at):
+ 
+ 
+-def _utterance_lookup(root,query,scope,view,valid_at,known_at,expected_version):
++def _utterance_lookup(root,query,scope,view,valid_at,known_at):
+     intent=scope.get('request_intent',{})
+     if view=='protected':
+@@ -295,4 +295,5 @@ def _utterance_lookup(root,query,scope,view,valid_at,known_at,expected_version):
+     try:
+         import math_memory_utterances
++        expected_version = _index_version(root)
+         result=math_memory_utterances.search(root,query,view=view,explicit_history_request=True,
+             concept_keys=(),formal_ids=scope.get('formal_ids',()),dates=dates,known_at=known_at,
+@@ -722,5 +723,5 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
+                           or source_first_request))
+     source_lookup=({'status':'not_requested','selection_status':'not_requested','records':[]}
+-                   if point_records else _utterance_lookup(root,scope_query,scope,view,valid_at,known_at,_index_version(root)))
++                   if point_records else _utterance_lookup(root,scope_query,scope,view,valid_at,known_at))
+ 
+     def read(selected, read_view=None):
+@@ -888,4 +889,11 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
+     evidence_keys = [key for key in keys if KEY.fullmatch(key)]
+     semantic_keys=list(evidence_keys)
++    # An atomic refresh can land after the utterance lookup's own check but
++    # before this read. Do not mix a prior generation's quotes or identifiers
++    # into the result from the newer native reader.
++    if (source_lookup.get('status') == 'available'
++            and source_lookup.get('native_version') != native.get('source_version')):
++        source_lookup = {'status': 'stale', 'selection_status': 'no_match', 'records': [],
++                         'reason': 'utterance_and_native_generations_differ'}
+     source_bindings=source_lookup.get('original_bindings',[]) if source_lookup.get('selection_status')=='matched' else []
+     bound_keys=list(dict.fromkeys(row.get('concept_key') for row in source_bindings
+@@ -1080,7 +1088,10 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
+                 and historical.get('status') not in ('stale', 'unavailable')
+                 and not invalidated)
++    delivered = _bound(native, max_bytes)
+     if known_version == query_version and reusable:
+-        return {'status': 'unchanged', 'version': query_version, 'source_version': native.get('source_version'),
+-                'view': view, 'identity': native.get('identity'), 'records': [],
+-                'memory_context': {'schema': SCHEMA, 'status': 'unchanged'}}
+-    return _bound(native, max_bytes)
++        from math_teaching_delivery import has_delivery_gap
++        if not has_delivery_gap(delivered):
++            return {'status': 'unchanged', 'version': query_version, 'source_version': native.get('source_version'),
++                    'view': view, 'identity': delivered.get('identity'), 'records': [],
++                    'memory_context': {'schema': SCHEMA, 'status': 'unchanged'}}
++    return delivered
+diff --git a/错题知识网络/scripts/math_recap.py b/错题知识网络/scripts/math_recap.py
+index a426753..c594e0a 100644
+--- a/错题知识网络/scripts/math_recap.py
++++ b/错题知识网络/scripts/math_recap.py
+@@ -771,8 +771,10 @@ def attach(result, root=ROOT, *, concepts=(), formal_id=None, source_id=None,
+                 and recap['status'] in ('available', 'no_match', 'protected'))
+     if known_version == combined_version and reusable:
+-        return {'status': 'unchanged', 'version': combined_version,
+-                'source_version': result.get('source_version'), 'view': view,
+-                'identity': result.get('identity'), 'records': [],
+-                'memory_context': {'status': 'unchanged'}, 'recap': _empty('unchanged')}
++        from math_teaching_delivery import has_delivery_gap
++        if not has_delivery_gap(value):
++            return {'status': 'unchanged', 'version': combined_version,
++                    'source_version': result.get('source_version'), 'view': view,
++                    'identity': value.get('identity'), 'records': [],
++                    'memory_context': {'status': 'unchanged'}, 'recap': _empty('unchanged')}
+     return value
+ 
+diff --git a/错题知识网络/scripts/math_teaching_context.py b/错题知识网络/scripts/math_teaching_context.py
+index ac1caf6..32ecf25 100644
+--- a/错题知识网络/scripts/math_teaching_context.py
++++ b/错题知识网络/scripts/math_teaching_context.py
+@@ -1234,4 +1234,6 @@ def build_parser() -> argparse.ArgumentParser:
+     resolve.add_argument('--source-question-id', help='Exact printed source ID; zero match is a new source')
+     resolve.add_argument('--known-version', help='Reuse this same-question response when unchanged')
++    resolve.add_argument('--audit-context', action='store_true',
++                         help='Describe the exact bounded stdout JSON on stderr (isolated evaluation)')
+     resolve.add_argument('--query', help='Scoped natural-language query; exact identities still take priority')
+     resolve.add_argument('--structured-math-query', action='store_true', dest='structured_math',
+@@ -1287,5 +1289,12 @@ def build_parser() -> argparse.ArgumentParser:
+ 
+ def main(argv: Sequence[str] | None = None) -> int:
+-    args = build_parser().parse_args(argv)
++    parser = build_parser()
++    args = parser.parse_args(argv)
++    audit = args.command == "resolve" and args.audit_context
++    if audit:
++        if args.full_evidence:
++            parser.error("--audit-context requires the bounded resolve path")
++        from math_teaching_delivery import emit_audit, perf_counter_ns
++        began_ns = perf_counter_ns()
+     try:
+         if args.command == "materialize":
+@@ -1343,5 +1352,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+                   "reason_code": "personal_context_unavailable", "reason": str(exc)}
+         code = 2
+-    if args.command == "resolve" and (args.concepts or args.query):
++    if audit:
++        emit_audit(result, args=args, began_ns=began_ns, exit_status=code)
++    elif args.command == "resolve" and (args.concepts or args.query):
+         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+     else:
+diff --git a/错题知识网络/scripts/math_teaching_delivery.py b/错题知识网络/scripts/math_teaching_delivery.py
+new file mode 100644
+index 0000000..91cf66c
+--- /dev/null
++++ b/错题知识网络/scripts/math_teaching_delivery.py
+@@ -0,0 +1,126 @@
++"""Audit the final bounded teaching response without fetching or writing evidence."""
++
++import hashlib
++import json
++import sys
++from time import perf_counter_ns
++
++
++def encode(value):
++    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
++
++
++def _budget_gap(row):
++    return (row.get("status") in ("budget_omitted", "budget_too_small")
++            or bool(row.get("required_min_bytes")))
++
++
++def has_delivery_gap(result):
++    """A version match must not turn an incomplete read into a full cache hit."""
++    if (result.get("status") not in ("available", "source_based")
++            or _budget_gap(result) or result.get("truncated") or result.get("memory_omitted")
++            or result.get("unknown") or result.get("ambiguous")
++            or result.get("teaching_inputs_status") == "budget_omitted"):
++        return True
++    for row in result.get("records", []):
++        if (row.get("status") in ("semantic_stale", "source_changed", "method_stale")
++                or row.get("step_evidence_status") in ("budget_omitted", "source_changed")
++                or _budget_gap(row)):
++            return True
++    memory = result.get("memory_context") or {}
++    if (_budget_gap(memory) or memory.get("required_full_bytes")
++            or memory.get("current_materials_omitted")):
++        return True
++    for key in ("personal_judgments", "personal_records", "pending_evidence", "historical_evidence",
++                "utterance_lookup"):
++        layer = memory.get(key) or {}
++        if (_budget_gap(layer) or layer.get("status") in ("partial", "stale", "unavailable")
++                or any(layer.get(field) for field in (
++                    "omitted_count", "omitted_records", "omitted_turns",
++                    "claims_omitted", "conflicts_omitted", "history_gaps", "record_scan_truncated"))):
++            return True
++    recap = result.get("recap") or {}
++    return _budget_gap(recap) or recap.get("status") in ("partial", "stale", "unavailable")
++
++
++def _delivered(result, requested_view):
++    """Pointers into stdout only. Never promote a candidate or a conflict to fact."""
++    if requested_view == "protected" or result.get("view", requested_view) == "protected":
++        return {}
++    groups = {}
++
++    def present(row, prefix, fields):
++        if not isinstance(row, dict):
++            return
++        for field in fields:
++            part = row.get(field)
++            if not part:
++                continue
++            target = f"{prefix}/{field}"
++            groups.setdefault(field, []).extend(
++                [f"{target}/{i}" for i in range(len(part))] if isinstance(part, list) else [target])
++
++    present(result, "", ("problem_solving", "exam_frequency", "choice_fill_guidance"))
++    present(result.get("recap"), "/recap", ("basic_formulas", "secondary_conclusions", "solution_methods"))
++    for i, row in enumerate(result.get("records", [])):
++        prefix = f"/records/{i}"
++        present(row, prefix, ("problem_solving", "step_reference", "conclusion_reference", "step_evidence",
++                              "teaching_preferences", "solution_connections"))
++        if row.get("status") == "semantic_current":
++            present(row, prefix, ("short_summary", "next_check"))
++    memory = result.get("memory_context") or {}
++    for key, fields in (
++        ("personal_judgments", ("claims", "conflicts")),
++        ("personal_records", ("records",)),
++        ("historical_evidence", ("points",)),
++        ("pending_evidence", ("records",)),
++    ):
++        layer = memory.get(key)
++        if isinstance(layer, dict):
++            prefix = "/memory_context/" + key
++            # Record groups have a common field name; their pointers preserve the role.
++            present(layer, prefix, fields)
++    points = (result.get("teaching_inputs") or {}).get("points", {})
++    for key, point in points.items():
++        if (point.get("exact_question_prior") or {}).get("status") == "available":
++            key = key.replace("~", "~0").replace("/", "~1")
++            present(point, f"/teaching_inputs/points/{key}", ("exact_question_prior",))
++    return groups
++
++
++def emit_audit(result, *, args, began_ns, exit_status):
++    """Keep stdout as the teaching JSON and print metadata separately to stderr."""
++    body = encode(result)
++    payload = body.encode("utf-8")
++    fields = ("concepts", "formal_id", "source_question_id", "query", "operation",
++              "fallback_concepts", "valid_at", "known_at", "for_teaching", "include_recap",
++              "recap_concepts", "include_pending", "known_version", "point_records",
++              "pending_capture_id", "pending_sequences", "pending_hint_sequences", "pending_spans",
++              "pending_whole_capture", "structured_math", "confirmed_concept", "selection_receipt",
++              "selection_basis", "selection_abstain", "backend_config")
++    scope = {key: getattr(args, key, None) for key in fields}
++    if scope["backend_config"] is not None:
++        scope["backend_config"] = str(scope["backend_config"])
++    receipt = {
++        "schema": "math-teaching-delivery-v1",
++        "view": args.view,
++        "scope_sha256": hashlib.sha256(
++            encode([args.view, args.max_bytes, scope]).encode("utf-8")).hexdigest(),
++        "status": result.get("status"),
++        "source_version": result.get("source_version"),
++        "version": result.get("version"),
++        "exit_status": exit_status,
++        "max_bytes": args.max_bytes,
++        "stdout_utf8_bytes": len(payload),
++        "stdout_sha256": hashlib.sha256(payload).hexdigest(),
++        "within_budget": len(payload) <= args.max_bytes,
++        "query_ms": round((perf_counter_ns() - began_ns) / 1_000_000, 3),
++        "body_state": "cached_body_not_returned" if result.get("status") == "unchanged" else
++                      "full_delivery_not_established" if has_delivery_gap(result) else "delivered",
++        "delivered_json_pointers": _delivered(result, args.view),
++    }
++    if hasattr(sys.stdout, "buffer"):
++        sys.stdout.buffer.write(payload + b"\n")
++    else:
++        print(body)
++    print(encode(receipt), file=sys.stderr)
+diff --git a/错题知识网络/scripts/math_tutoring_inputs.py b/错题知识网络/scripts/math_tutoring_inputs.py
+index 60f7487..9df885f 100644
+--- a/错题知识网络/scripts/math_tutoring_inputs.py
++++ b/错题知识网络/scripts/math_tutoring_inputs.py
+@@ -161,4 +161,5 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
+         value = compact_before_omitting(value)
+     if len(encoded(value)) <= max_bytes:
++        exact_prior_omitted = False
+         if (add_exact and repo is not None and exact_key and result.get("status") == "available"
+                 and (result.get("identity") or {}).get("formal_id")):
+@@ -182,4 +183,5 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
+                     needed = 0
+             if needed > max_bytes:
++                exact_prior_omitted = True
+                 point["exact_question_prior"] = {"status": "budget_omitted", "required_min_bytes": needed}
+                 if len(encoded(value)) > max_bytes:
+@@ -192,12 +194,13 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
+                 value["version"] = version
+                 recap = (result.get("recap") or {}).get("status")
+-                if (known_version == version and result.get("status") in {"available", "source_based"}
++                if (known_version == version and not exact_prior_omitted
+                         and recap in {None, "available", "no_match", "protected"}
+-                        and (result.get("memory_context") or {}).get("status") != "budget_too_small"
+                         and not any(p.get("exact_question_prior", {}).get("status") in
+                                     {"budget_omitted", "budget_too_small", "unavailable", "stale"}
+                                     for p in decision["points"].values())):
+-                    return {"status": "unchanged", "version": version, "view": result["view"], "records": [],
+-                            "source_version": result.get("source_version"), "identity": result.get("identity")}
++                    from math_teaching_delivery import has_delivery_gap
++                    if not has_delivery_gap(value):
++                        return {"status": "unchanged", "version": version, "view": result["view"], "records": [],
++                                "source_version": result.get("source_version"), "identity": result.get("identity")}
+         return value
+     # The extra pointers never evict the methods, conditions or evidence itself.

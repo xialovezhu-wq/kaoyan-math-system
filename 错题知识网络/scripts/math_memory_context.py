@@ -15,7 +15,7 @@ import re
 import sqlite3
 
 SCHEMA = 'math-memory-context-v1'
-CONTEXT_REVISION = '2026-11-15.scoped-memory-read'
+CONTEXT_REVISION = '2026-11-16.evidence-bound-delivery'
 KEY = re.compile(r'MATH-CONCEPT-[0-9a-f]{24}')
 PERSONAL = ('short_summary', 'overview', 'progress', 'next_check',
             'exam_brief', 'latest_date', 'first_date', 'timeline_count', 'explicit_observation_count')

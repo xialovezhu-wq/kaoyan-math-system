@@ -13,6 +13,8 @@
 
 `claims` 每项使用 `claim_id/content/scope/basis/status/source_refs/observation_refs`；有效时间为可选 `valid_from/valid_to`，替代与冲突为可选 `supersedes/conflicts_with`。`observation_refs` 精确绑定 `event_id` 与 `observation_sha256`，不能用题目标签代替真实观察。没有已提交观察的新材料可引用完整原始用户原话，保持其证据限制；不得为了绑定新增观察事件。删改旧条目须有 `claims_revision_reason`。
 
+读当前或 `valid_at` 时，只有同知识点内已确认、来源核验通过且无未解冲突的替代可结束旧判断。候选或纯推断的 `supersedes` 只保留为关系线索。历史替代使用已知范围内的有效日期。后继证据变化时继续遵守明确撤回和原有效期。如果已登记的替代无法验回且旧判断仍需裁决，返回 `supersession_unverified`，保留可见的冲突及证据缺口。
+
 `basis` 沿用 `user_observed/user_confirmed/self_reported/assistant_inferred/source_verified` 的角色区别；`assistant_inferred` 不能作为 active 确定事实。source_verified 仅表示来源内容核实，不自动证明用户会做。
 
 ## 更新、更正与历史
@@ -77,6 +79,8 @@ A 外发分包在原计划和 stage 回执上运行 `inspect-contributions`，�
 部分命中、预算整块省略或来源失效时，重复提交同一 `known_version` 不返回 `unchanged`。原话索引的候选、来源绑定及原生内容须属于同一索引代；读到不同代时丢弃原话候选及句柄，并标为 stale。
 
 隔离验收在现有有界 `resolve` 上加 `--audit-context`（不可与 `--full-evidence` 同用）。stdout 是该次读取的 UTF-8 JSON；stderr 的 `math-teaching-delivery-v1` 记录请求范围指纹、视图、源版本、实际响应哈希和字节数（不计末尾换行）、有界查询耗时和送达字段的 JSON Pointer。回执不回显查询文本、原话、文件路径或完整响应；它也不为任何字段背书。已省略的正文不计送达，`unchanged` 不计作新返回材料。受保护回执不列证据指针。正文留在该请求允许的范围内，开发回放可私有留档，日常不写记录。
+
+已请求历史时，逐点和逐事件的 `partial`、证据缺口及原子省略会阻止完整 `unchanged`。同版部分响应保留可用正文及缺口。回执分别记录来源核验状态、已读索引版本、该范围的已知事件和省略计数，以及最终送达的事件位置。全量来源覆盖未知时记 `unknown`，明确过滤掉的历史不进入缺口计数。`protected`、`not_requested` 继续表示权限或请求范围。JSON Pointer 只证明字段进入正文，读取器的 `answer_reference_binding` 为 `not_established`。
 
 冷构建不从未经语义审核的观察或卡级记录摘取正文。当前已审核且来源有效的短摘要按原单元交付；其余只返回现有证据状态。若有逐点观察，历史定位由日期、稳定记录 ID、原观察哈希、有效 outcome 和提示依赖组成；没有提示记载不等于无提示完成。观察正文及原有纠正仍在精确证据路径中；同范围未决或条件不同，均不按导入顺序选用结论。旧版索引尚未重建时，读取器只屏蔽旧的证据整理正文，不在查询内重建。该兼容处理不改变正式观察、调度或答案权限。
 

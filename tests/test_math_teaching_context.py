@@ -375,6 +375,136 @@ method_gap:
         self.assertEqual(1, query.call_count)
         self.assertEqual("stale_page", json.loads(output.getvalue())["status"])
 
+    def test_temporal_delivery_retains_nested_gaps_on_same_version(self):
+        import math_concept_index as native
+        import math_learning_profiles as profiles
+        import math_memory_context as memory
+        from math_teaching_delivery import has_delivery_gap
+
+        self.build_concept_fixtures([])
+        key = native.concept_key("曲面积分")
+        point = {"concept_key": key, "status": "partial", "history_complete": False,
+                 "event_count": 4, "events_omitted": 3, "history_gaps_total": 1,
+                 "history_gaps": [{"reason": "source_unavailable"}],
+                 "events": [{"event_id": "EVENT-1", "source_ref_count": 3, "source_refs_omitted": 1}]}
+        history = {"status": "available", "points": [point], "source_version": memory._index_version(self.repo)}
+        args = ["--repo", str(self.repo), "resolve", "--concept", key, "--view", "after_attempt",
+                "--valid-at", "2026-10-01", "--audit-context", "--for-teaching", "--max-bytes", "4500"]
+
+        def bounded_profile(*_args, **_options):
+            # Keep unrelated current material out of the synthetic history-only case.
+            return {"status": "available", "view": "after_attempt", "version": "native-query",
+                    "source_version": history["source_version"], "records": [
+                        {"concept_key": key, "concept_name": "曲面积分", "status": "evidence_digest_only"}]}
+
+        def read(*extra):
+            with mock.patch.object(profiles, "resolve", side_effect=bounded_profile), \
+                 contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as audit:
+                self.assertEqual(0, teaching.main([*args, *extra]))
+            return json.loads(output.getvalue()), json.loads(audit.getvalue())
+
+        with mock.patch.object(memory, "_historical_evidence", return_value=history):
+            first, audit = read()
+            retry, _ = read("--known-version", first["version"])
+            self.assertEqual(first, retry)
+            self.assertEqual("full_delivery_not_established", audit["body_state"])
+            observed = audit["historical_evidence"]
+            self.assertEqual("partial_delivery", observed["status"])
+            self.assertEqual(4, observed["selection"]["indexed_events_in_scope"])
+            self.assertEqual(3, observed["selection"]["events_omitted"])
+            self.assertEqual(1, observed["delivery"]["events"])
+            self.assertEqual({"events_omitted", "history_source_unverified", "history_incomplete", "source_refs_omitted"},
+                             set(observed["gap_reasons"]))
+            self.assertEqual(["/memory_context/historical_evidence/points/0/events/0"],
+                             audit["delivered_json_pointers"]["events"])
+            self.assertEqual("not_established", audit["answer_reference_binding"])
+            self.assertNotIn("EVENT-1", json.dumps(audit))
+
+        point.update(status="available", event_count=1, events_omitted=0, history_gaps_total=0,
+                     history_gaps=[], history_complete=True)
+        point["events"][0].pop("source_refs_omitted")
+        with mock.patch.object(memory, "_historical_evidence", return_value=history):
+            first, audit = read()
+            self.assertFalse(has_delivery_gap(first))
+            self.assertEqual("complete_delivery", audit["historical_evidence"]["status"])
+            retry, _ = read("--known-version", first["version"])
+            self.assertEqual("unchanged", retry["status"])
+        for status in ("protected", "not_requested"):
+            # No absent/out-of-scope denominator is inferred from withheld data.
+            scoped = {**first, "memory_context": {"historical_evidence": {"status": status, "points": []}}}
+            self.assertFalse(has_delivery_gap(scoped))
+
+    def write_claim_fixture(self, claims, recorded_at):
+        import math_concept_index as native
+        import math_memory_lifecycle as memory
+
+        key = native.concept_key("曲面积分")
+        path = self.repo / memory.SEMANTIC / (key + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            previous = path.read_text()
+            history = path.parent / "历史版本" / key
+            history.mkdir(parents=True, exist_ok=True)
+            (history / (json.loads(previous)["content_sha256"] + ".json")).write_text(previous)
+        profile = {"concept_key": key, "claims": claims, "memory_recorded_at": recorded_at}
+        path.write_text(memory.canonical({**profile, "content_sha256": memory.digest(profile)}))
+        return key
+
+    def memory_claim_fixture(self):
+        original_source = self.repo / "prior-observation.json"
+        quote = "我先检查这个条件。"
+        original_source.write_text(json.dumps({"turns": [{"role": "user", "sequence": 1, "text": quote}]}))
+        claim = {"claim_id": "prior", "content": "原有的确认判断。", "scope": "在原有条件下",
+                 "basis": "user_observed", "status": "active", "valid_from": "2026-09-01",
+                 "source_refs": [{"path": original_source.name, "sha256": teaching.sha256_file(original_source),
+                                  "quote": quote, "role": "user", "sequence": 1}], "observation_refs": []}
+        source = self.repo / "new-evidence.txt"
+        source.write_text("Replacement evidence fixture")
+        return claim, {**claim, "claim_id": "replacement", "content": "后续判断。", "valid_from": "2026-10-01",
+                       "basis": "source_verified", "supersedes": ["prior"],
+                       "source_refs": [{"path": source.name, "sha256": teaching.sha256_file(source)}]}
+
+    def test_candidates_and_conflicts_cannot_replace_a_confirmed_claim(self):
+        import math_memory_lifecycle as memory
+
+        prior, successor = self.memory_claim_fixture()
+        variants = ({"basis": "assistant_inferred", "status": "candidate"},
+                    {"status": "candidate", "source_refs": [{"path": "unavailable.txt", "sha256": "0" * 64}]},
+                    {"status": "conflicted"}, {"status": "active", "conflicts_with": ["prior"]})
+        for i, change in enumerate(variants, 2):
+            key = self.write_claim_fixture([prior, {**successor, **change}], f"2026-10-0{i}T08:00:00+08:00")
+            for day in (None, "2026-10-15"):
+                with self.subTest(change=change, valid_at=day):
+                    result = memory.resolve_memory_claims(self.repo, [key], valid_at=day, view="direct")
+                    self.assertEqual("active", next(c["status"] for c in result["claims"] if c["claim_id"] == "prior"))
+                    if change["status"] == "candidate":
+                        self.assertEqual("candidate", next(c["status"] for c in result["claims"] if c["claim_id"] == "replacement"))
+
+    def test_verified_replacement_survives_archiving_and_drift_does_not_revive_the_prior(self):
+        import math_memory_lifecycle as memory
+
+        prior, successor = self.memory_claim_fixture()
+        successor["valid_to"] = "2026-10-04"
+        key = self.write_claim_fixture([prior], "2026-09-02T08:00:00+08:00")
+        self.write_claim_fixture([prior, successor], "2026-10-02T08:00:00+08:00")
+        self.write_claim_fixture([prior], "2026-10-05T08:00:00+08:00")
+
+        def read(**times):
+            result = memory.resolve_memory_claims(self.repo, [key], view="direct", **times)
+            return {c["claim_id"]: c["status"] for c in result["claims"]}, result["history_gaps"]
+
+        self.assertEqual({"prior": "superseded"}, read()[0])
+        self.assertEqual({}, read(valid_at="2026-10-15")[0])
+        self.assertEqual({"prior": "active"}, read(valid_at="2026-09-30")[0])
+        self.assertEqual({"prior": "active"}, read(valid_at="2026-10-15", known_at="2026-10-01")[0])
+        (self.repo / "new-evidence.txt").write_text("Changed after acceptance")
+        for dates in ({}, {"valid_at": "2026-10-15"}):
+            self.assertEqual(({"prior": "conflicted"}, [
+                {"concept_key": key, "claim_id": "prior", "reason": "supersession_unverified"}]), read(**dates))
+        self.write_claim_fixture([{**prior, "status": "retracted"}], "2026-10-06T08:00:00+08:00")
+        self.assertEqual({"prior": "retracted"}, read()[0])
+        self.assertEqual({"prior": "retracted"}, read(valid_at="2026-10-15")[0])
+
     def concept_event_fixture(self, *, kind="concept_review", count=40):
         import math_concept_index as native
         key = native.concept_key("曲面积分")

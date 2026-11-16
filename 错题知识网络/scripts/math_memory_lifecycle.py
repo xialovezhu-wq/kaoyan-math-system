@@ -347,7 +347,8 @@ def prepare_corrections(root, payload, known_concepts):
         elif value['target_kind'] == 'claim':
             if not isinstance(target, dict) or set(target) != {'claim_id', 'claim_sha256'}:
                 raise ValueError('memory_exact_claim_target_required')
-            matches = {claim_hash(c) for profile in _profile_versions(root, value['concept_key'])
+            versions, _ = _profile_versions(root, value['concept_key'])
+            matches = {claim_hash(c) for profile in versions
                        for c in profile.get('claims', []) if c['claim_id'] == target['claim_id'] and claim_hash(c) == target['claim_sha256']}
             if len(matches) != 1:
                 raise ValueError('memory_claim_target_not_unique')
@@ -488,32 +489,115 @@ def apply_observation_corrections(root, events, *, valid_at=None, known_at=None,
     return rows
 
 
-def _profile_versions(root, key, *, include_history=True):
+def _profile_versions(root, key, *, include_history=True, include_decisions=False):
     directory = Path(root)/SEMANTIC
-    current = directory/(key+'.json')
-    paths = list((directory/'历史版本'/key).glob('*.json')) if include_history else []
-    paths += [current] if current.is_file() else []
+    current_path = directory/(key+'.json')
+    current = _safe_json(root, current_path) if current_path.is_file() else None
     values = []
-    for path in paths:
-        value = _safe_json(root, path)
+    if include_history or (include_decisions and current and current.get('claims')):
+        values = [_safe_json(root, path) for path in (directory/'历史版本'/key).glob('*.json')]
+    if current is not None:
+        values.append(current)
+    for value in values:
         if value.get('concept_key') != key or value.get('content_sha256') != digest({k: v for k, v in value.items() if k != 'content_sha256'}):
             raise ValueError('memory_profile_integrity_invalid')
-        values.append(value)
-    return values
+    return values, current
 
 
-def _claims_at(versions, current, key, valid, known, gaps):
-    """Separate fact validity from which revisions had actually been recorded."""
+def _profiles_known_at(versions, current, key, known, gaps):
     if known is None:
-        available = versions
-        latest = current
-    else:
-        available = [v for v in versions if v.get('memory_recorded_at') and _moment(v['memory_recorded_at']) <= known]
-        latest = max(available, key=lambda v: (_moment(v['memory_recorded_at']), v == current)) if available else None
-        if not available and all(v.get('memory_recorded_at') for v in versions):
-            gaps.append({'concept_key': key, 'reason': 'no_profile_known_by_cutoff'})
-        elif any(not v.get('memory_recorded_at') for v in versions):
-            gaps.append({'concept_key': key, 'reason': 'legacy_profile_recorded_time_unknown'})
+        return versions, current
+    available = [v for v in versions if v.get('memory_recorded_at') and _moment(v['memory_recorded_at']) <= known]
+    latest = max(available, key=lambda v: (_moment(v['memory_recorded_at']), v == current)) if available else None
+    if not available and all(v.get('memory_recorded_at') for v in versions):
+        gaps.append({'concept_key': key, 'reason': 'no_profile_known_by_cutoff'})
+    elif any(not v.get('memory_recorded_at') for v in versions):
+        gaps.append({'concept_key': key, 'reason': 'legacy_profile_recorded_time_unknown'})
+    return available, latest
+
+
+def _check_claim(root, original, profile, relevant, source_checks):
+    claim = {**copy.deepcopy(original), 'concept_key': profile['concept_key'],
+             'claim_sha256': claim_hash(original), 'recorded_at': profile.get('memory_recorded_at'),
+             'profile_revision': profile['content_sha256']}
+    acknowledged = set(profile.get('memory_correction_ids', []))
+    # Acknowledging the review refreshes the overview. An exact withdrawal
+    # continues to apply to the immutable claim it names.
+    affected = [c for c in relevant if
+                (c['target_kind'] == 'claim' and c['target'] ==
+                 {'claim_id': claim['claim_id'], 'claim_sha256': claim['claim_sha256']})
+                or (c['target_kind'] == 'observation' and c['correction_id'] not in acknowledged
+                    and c['target'] in claim.get('observation_refs', []))]
+    if affected:
+        disputed = any(c['action'] == 'conflict' for c in affected)
+        withdrawn = any(c['target_kind'] == 'claim' and c['action'] == 'retract' for c in affected)
+        claim.update(memory_status='conflicted' if disputed else 'retracted' if withdrawn else 'evidence_corrected',
+                     status='conflicted' if disputed else 'retracted' if withdrawn else 'candidate',
+                     memory_correction_ids=[c['correction_id'] for c in affected])
+    elif not claim.get('observation_refs'):
+        # A raw quote without an observation binding needs dependency rechecking.
+        source_hashes = {r.get('sha256') for r in claim['source_refs']}
+        raw_dependencies = [c['correction_id'] for c in relevant if c['target_kind'] == 'observation'
+                            and c['correction_id'] not in acknowledged and source_hashes &
+                            {r.get('sha256') for r in c.get('_target_evidence', {}).get('source_refs', [])}]
+        if raw_dependencies:
+            claim.update(memory_status='dependency_unknown', status='candidate', memory_correction_ids=raw_dependencies)
+    source_key = digest(claim['source_refs'])
+    if source_key not in source_checks:
+        try:
+            _source_refs(root, claim['source_refs'])
+        except (OSError, ValueError):
+            source_checks[source_key] = False
+        else:
+            source_checks[source_key] = True
+    if not source_checks[source_key]:
+        claim['memory_status'] = 'source_changed'
+        if claim['status'] == 'active':
+            claim['status'] = 'candidate'
+    if claim['status'] == 'active' and claim['basis'] == 'assistant_inferred':
+        claim['status'] = 'candidate'
+    if original['status'] in {'retracted', 'superseded'} and claim['status'] == 'candidate':
+        claim['status'] = original['status']
+    return claim
+
+
+def _replacement_decisions(profiles, checked, *, dated_only):
+    """Resolve edges for one concept before they can affect a predecessor."""
+    decisions = {}
+    for profile in profiles:
+        claims = profile.get('claims', [])
+        disputed = {cid for peer in claims if peer['status'] in {'active', 'conflicted'}
+                    and peer['basis'] != 'assistant_inferred' for cid in peer.get('conflicts_with', [])}
+        for claim in claims:
+            targets = claim.get('supersedes', [])
+            if (not targets or claim['status'] != 'active' or claim['basis'] not in CLAIM_BASES - {'assistant_inferred'}
+                    or claim.get('conflicts_with') or claim['claim_id'] in disputed):
+                continue
+            start = _moment(claim.get('valid_from'))
+            if start is None and dated_only:
+                continue
+            status = checked(claim, profile)['status']
+            if status == 'active':
+                decision = 'confirmed'
+            elif profile.get('memory_recorded_at'):
+                # A committed active edge may have taken effect before its
+                # evidence changed. Keep the predecessor open to review.
+                decision = 'unverified'
+            else:
+                continue
+            for target in targets:
+                decisions.setdefault(target, set()).add((start, decision))
+    return decisions
+
+
+def _applicable_replacements(claim, replacements):
+    start = _moment(claim.get('valid_from'))
+    return [(when, decision) for when, decision in replacements.get(claim['claim_id'], ())
+            if start is None or when is None or when >= start]
+
+
+def _claims_at(available, latest, key, valid, gaps, replacements):
+    """Separate fact validity from which revisions had actually been recorded."""
     if latest is None:
         return []
     if valid is None:
@@ -539,10 +623,8 @@ def _claims_at(versions, current, key, valid, known, gaps):
                           and (other_profile is latest or
                                profile.get('memory_recorded_at') and other_profile.get('memory_recorded_at')
                                and _moment(other_profile['memory_recorded_at']) > _moment(profile['memory_recorded_at']))]
-            successors += [_moment(other['valid_from']) for other_profile in available
-                           for other in other_profile.get('claims', [])
-                           if cid in other.get('supersedes', []) and other.get('valid_from')
-                           and _moment(other['valid_from']) > start]
+            successors += [when for when, decision in _applicable_replacements(claim, replacements)
+                           if decision == 'confirmed']
             if successors:
                 inferred_stop = min(successors)
                 stop = min(stop, inferred_stop) if stop is not None else inferred_stop
@@ -573,24 +655,19 @@ def resolve_memory_claims(root, concept_keys, *, valid_at=None, known_at=None, v
                 'invalidated_concept_keys': [], 'affected_observations': [],
                 'valid_at': valid_at, 'known_at': known_at}
     revisions, gaps, missing, claims, conflicts, invalidated = [], [], [], [], [], set()
+    source_checks = {}
+    cutoff = valid if valid is not None else datetime.now(timezone.utc)
     corrections = _corrections_at(root, valid_at=valid_at, known_at=known_at, concept_keys=keys)
     affected_observations = list({(c['concept_key'], c['target']['event_id'], c['target']['observation_sha256']):
                                  copy.deepcopy(c['_target_evidence']) for c in corrections
                                  if c['target_kind'] == 'observation' and c.get('_target_evidence')}.values())
     for key in keys:
-        versions = _profile_versions(root, key, include_history=valid is not None or known is not None)
-        if not versions:
-            missing.append(key)
-            continue
-        current_path = Path(root)/SEMANTIC/(key+'.json')
-        current = _safe_json(root, current_path) if current_path.is_file() else None
-        pairs = _claims_at(versions, current, key, valid, known, gaps)
+        # Only the requested point's structured claims need prior decisions.
+        versions, current = _profile_versions(root, key, include_history=bool(valid or known), include_decisions=True)
         if current is None:
             missing.append(key)
             continue
-        revisions.extend(sorted({p['content_sha256'] for c, p in pairs}))
-        if not pairs and known is None and valid is None:
-            revisions.append(current['content_sha256'])
+        available, latest = _profiles_known_at(versions, current, key, known, gaps)
         relevant = [c for c in corrections if c['concept_key'] == key]
         # A newer maintenance profile can explicitly acknowledge every decision
         # when compiling a fresh overview. Unacknowledged legacy prose is stale.
@@ -601,47 +678,42 @@ def resolve_memory_claims(root, concept_keys, *, valid_at=None, known_at=None, v
         # prose closed until it is explicitly reconciled.
         if unseen:
             invalidated.add(key)
+        verified = {}
+
+        def checked(original, profile):
+            cache_key = (profile['content_sha256'], original['claim_id'])
+            if cache_key not in verified:
+                verified[cache_key] = _check_claim(root, original, profile, relevant, source_checks)
+            return verified[cache_key]
+
+        replacements = _replacement_decisions(available, checked, dated_only=valid is not None)
+        pairs = _claims_at(available, latest, key, valid, gaps, replacements)
+        revision_ids = {profile['content_sha256'] for _, profile in pairs}
+        if replacements:
+            revision_ids.update(p['content_sha256'] for p in available)
+        if not pairs and valid is None and known is None:
+            revision_ids.add(current['content_sha256'])
+        revisions.extend(sorted(revision_ids))
         for original, profile in pairs:
-            unseen = [c for c in relevant if c['correction_id'] not in set(profile.get('memory_correction_ids', []))]
-            claim = {**copy.deepcopy(original), 'concept_key': key,
-                     'claim_sha256': claim_hash(original),
-                     'recorded_at': profile.get('memory_recorded_at'),
-                     'profile_revision': profile['content_sha256']}
-            affected = [c for c in unseen if
-                        c['target_kind'] == 'claim' and c['target'] == {'claim_id': claim['claim_id'], 'claim_sha256': claim['claim_sha256']}
-                        or c['target_kind'] == 'observation' and c['target'] in claim.get('observation_refs', [])]
-            # Before the originating closeout exists a claim may bind the raw
-            # quote but have no observation ID yet. Shared source bytes do not
-            # prove the same mistake; they do require dependency rechecking.
-            raw_dependencies = [c for c in unseen if c['target_kind'] == 'observation'
-                                and not claim.get('observation_refs')
-                                and {r.get('sha256') for r in claim.get('source_refs', [])} &
-                                {r.get('sha256') for r in c.get('_target_evidence', {}).get('source_refs', [])}]
-            if not affected and raw_dependencies:
+            claim = checked(original, profile).copy()
+            if claim.get('memory_status'):
                 invalidated.add(key)
-                claim.update(memory_status='dependency_unknown', status='candidate',
-                             memory_correction_ids=[c['correction_id'] for c in raw_dependencies])
-            if affected:
-                invalidated.add(key)
-                direct_retraction = any(c['target_kind'] == 'claim' and c['action'] == 'retract' for c in affected)
-                claim.update(memory_status='conflicted' if any(c['action'] == 'conflict' for c in affected) else 'retracted' if direct_retraction else 'evidence_corrected',
-                             status='conflicted' if any(c['action'] == 'conflict' for c in affected) else 'retracted' if direct_retraction else 'candidate',
-                             memory_correction_ids=[c['correction_id'] for c in affected])
-            try:
-                _source_refs(root, claim['source_refs'])
-            except (OSError, ValueError):
-                claim.update(memory_status='source_changed', status='candidate')
-                invalidated.add(key)
+            if claim['status'] == 'active':
+                decisions = {decision for when, decision in _applicable_replacements(original, replacements)
+                             if when is None or when <= cutoff}
+                stop = _moment(original.get('valid_to'))
+                if 'confirmed' in decisions:
+                    claim['status'] = 'superseded'
+                elif stop is not None and stop <= cutoff:
+                    continue
+                elif 'unverified' in decisions:
+                    reason = 'supersession_unverified'
+                    claim.update(memory_status=reason, status='conflicted')
+                    gaps.append({'concept_key': key, 'claim_id': claim['claim_id'], 'reason': reason})
+                    invalidated.add(key)
             if claim['status'] == 'conflicted' or claim.get('conflicts_with'):
                 conflicts.append({'concept_key': key, 'claim_id': claim['claim_id']})
             claims.append(claim)
-    # Claim IDs are stable within a concept, not a global namespace. Never let
-    # one point's replacement or conflict alter an identically named peer.
-    superseded = {(c['concept_key'], cid) for c in claims
-                  if c['status'] not in {'retracted', 'conflicted'} for cid in c.get('supersedes', [])}
-    for claim in claims:
-        if (claim['concept_key'], claim['claim_id']) in superseded and claim['status'] == 'active':
-            claim['status'] = 'superseded'
     result = {'status': 'available' if claims else 'legacy_unstructured' if revisions and not (valid_at or known_at) else 'history_unknown' if gaps else 'not_recorded',
               'version': digest([version(root, keys), revisions, valid_at, known_at, view]),
               'claims': claims, 'conflicts': conflicts, 'missing': missing,

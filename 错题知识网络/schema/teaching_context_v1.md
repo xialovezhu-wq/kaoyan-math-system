@@ -18,14 +18,14 @@
 ```json
 {
   "schema_version": "math-teaching-context-v1",
-  "formal_id": "GS-907",
+  "formal_id": "GS-748",
   "precedence": {
     "current_question_evidence": "external_runtime_authoritative",
     "historical_context": "prior_only",
     "history_must_not_override_current": true
   },
   "source_bindings": {
-    "formal_card_path": "错题知识网络/错题卡/GS-907_fixture.md",
+    "formal_card_path": "错题知识网络/错题卡/GS-748_fixture.md",
     "formal_card_sha256": "<sha256>",
     "formal_evidence_id": "EV-<id>",
     "formal_evidence_source_version": "<training_evidence source_version>",
@@ -121,8 +121,21 @@ sha256({
 
 ```bash
 python3 错题知识网络/scripts/math_teaching_context.py --repo . materialize --input /path/to/context.json
-python3 错题知识网络/scripts/math_teaching_context.py --repo . resolve --formal-id GS-907 --view protected
-python3 错题知识网络/scripts/math_teaching_context.py --repo . verify --formal-id GS-907
+python3 错题知识网络/scripts/math_teaching_context.py --repo . resolve --formal-id GS-748 --view protected
+python3 错题知识网络/scripts/math_teaching_context.py --repo . verify --formal-id GS-748
 ```
 
-`resolve` 在缺失、漂移或损坏时返回 `status=unavailable`，不会扩大读取范围。`verify` 返回严格校验结果。物化回执包含 `formal_id`、`context_path`、`context_sha256`、`pointer_path` 和 `pointer_sha256`，供正式 closeout 门禁绑定。
+精确旧切片读取函数 `resolve_context` 在缺失、漂移或损坏时返回 `status=unavailable`，不会扩大读取范围；普通讲题CLI的当前摘要恢复见下节。`verify` 返回严格校验结果。物化回执包含 `formal_id`、`context_path`、`context_sha256`、`pointer_path` 和 `pointer_sha256`，供正式 closeout 门禁绑定。
+
+
+## 当前讲题查询的有界恢复
+
+有界 `resolve` 按最终紧凑 JSON（UTF-8，不计换行）测量 `--max-bytes`，含 `total`、`returned`、`truncated` 和实际送达的扩展元数据。预算不够时省略完整记录或完整材料块，不拆正文和条件。4500 字节验收覆盖三视图；`protected` 不返回观察正文或历史定位。只有现行且范围匹配的审核短摘要可指导讲法，证据不足时按本题题设与作答继续。
+
+普通讲题的 `resolve --concept` / `--source-question-id` / `--formal-id` 读取当前 `math_learning_profiles` 派生视图。先用确切名称、已登记别名和身份；未命中时同次读取最多3个当前候选，返回 `resolution` 与逐项 `retrieval_scope`。候选须按当前题的对象、目标和操作核对，不能把名称相似或父主题相同当作精确个人史命中。可用重复的 `--fallback-concept` 指定已确认的相关名称或父主题；该参数仅在主查询未命中时生效。候选保留当前视图的答案保护和来源校验，原始 `unknown` 不被抹去。
+
+CLI观察到派生索引缺失或来源变化时，返回相应失效状态；讲题不触发构建器。底层 `math_learning_profiles.resolve` 保持只读，`--full-evidence` 保持原合同。
+
+讲题模式追加 `--for-teaching`，返回 `teaching_inputs`。逐点返回本轮应核对的证据角色及 JSON Pointer；只指向本响应实际包含的完整字段。顶级 available 不改写各点的语义状态。语义过期时不标记该旧摘要为可用，但独立核验的偏好和有效的具体观察可分别使用。精确题号加细点若具备同一快照，可从只读索引取得最近一组同题逐点观测；来源漂移或同日无法排序不选赢家，附当次适用的子问边界，不借用卡级或其他题观测。after_attempt 只返回观察类型、顺序和来源；direct 才可附短的已接纳观察注解（不是用户原话）。protected 的 points 为空，不读取这层。扩展预算不足时整组省略，不挤掉已读的公式或条件。它不自动选解法或授权制图；本题真实作答、题面和本轮权限仍优先。
+
+考频JSON保留实际年份及来源校验；默认播报只给高/中/低频、question_count去重考查次数及必要范围，不列年份、不把year_count当题次。父主题统计仍须标明，多个主题次数不相加。

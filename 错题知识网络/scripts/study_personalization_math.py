@@ -106,7 +106,7 @@ def _write(path, value):
             os.unlink(temporary)
 
 
-def export_snapshot(repo_root: Path, output_dir: Path) -> dict:
+def export_snapshot(repo_root: Path, output_dir: Path, *, formal_quality=None) -> dict:
     """Export JSON under one SQLite read transaction; never copy a live database."""
     root = Path(repo_root).resolve()
     path = root / native.INDEX
@@ -132,8 +132,10 @@ def export_snapshot(repo_root: Path, output_dir: Path) -> dict:
         # Native raw-user evidence can have a complete turn file behind the
         # selected excerpt. Export the exact referenced caches as evidence too.
         cache_prefix = "错题知识网络/个人知识点索引/source_cache/"
+        method_cache_prefix = "错题知识网络/个人知识点索引/做题方法/source_cache/"
         review_prefix = "数学一回滚复习系统/知识点复盘/正式会话/"
-        evidence_refs = {p: sha for p, _, sha in source_rows if p.startswith((cache_prefix, review_prefix))}
+        evidence_prefixes = (cache_prefix, method_cache_prefix, review_prefix)
+        evidence_refs = {p: sha for p, _, sha in source_rows if p.startswith(evidence_prefixes)}
         def collect_cache_refs(value):
             if isinstance(value, dict):
                 cache = value.get("user_turn_cache")
@@ -148,7 +150,7 @@ def export_snapshot(repo_root: Path, output_dir: Path) -> dict:
         evidence = []
         for reference, sha in sorted(evidence_refs.items()):
             source = root / reference
-            allowed_root = root / (review_prefix if reference.startswith(review_prefix) else cache_prefix)
+            allowed_root = root / next(prefix for prefix in evidence_prefixes if reference.startswith(prefix))
             if source.is_symlink() or not source.resolve().is_relative_to(allowed_root.resolve()):
                 raise ValueError("unsafe_native_cache_reference")
             raw = source.read_bytes()
@@ -205,6 +207,8 @@ def export_snapshot(repo_root: Path, output_dir: Path) -> dict:
                    "kind": "personalization_shard", "expected_sha256": sha}
                   for relative, sha in sorted(shard_files.items())]
     manifest["source_mappings"] = [{k: v for k, v in row.items() if k != "source_path"} for row in extra_files]
+    if formal_quality is not None:
+        manifest["formal_quality"] = formal_quality
     _write(manifest_path, native.canonical(manifest).encode())
     return {**identity, "manifest_path": str(manifest_path), "entrypoint": ENTRYPOINT,
             "files": [{"source_path": str(manifest_path), "publish_path": ENTRYPOINT,

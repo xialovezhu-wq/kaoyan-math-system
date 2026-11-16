@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Materialize and resolve one bounded math teaching context by formal ID.
+"""Materialize exact-card slices and resolve current bounded teaching context.
 
 The version object is immutable and content-addressed.  ``current.json`` is
-the only mutable pointer and is replaced last.  The hot resolver reads that
-exact pointer and version only; it never scans the wrong-card library, intake
-ledger, conversation packages, Obsidian, or T9.
+the only mutable pointer and is replaced last. The exact-slice reader stays
+bound to that pointer. The ordinary teaching entry reads prepared profiles
+and reports when their derived index needs maintenance.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 import training_evidence
 import math_learning_state
+import math_runtime_paths
 
 
 CONTEXT_SCHEMA = "math-teaching-context-v1"
@@ -1150,13 +1151,74 @@ def teaching_record_projection(record: dict, raw_record: dict, view: str) -> dic
 
 def resolve_teaching_concepts(repo_root: Path | str, concepts: list[str],
                              view: str = "protected", max_bytes: int = 10000,
-                             offset: int = 0, material_limit: int = 1) -> dict:
-    import math_learning_profiles
-    # Full evidence remains available through math_concept_index. The learning
-    # entry reads already prepared rows instead of projecting every raw record.
+                             offset: int = 0, material_limit: int = 1, *,
+                             known_version: str | None = None, formal_id: str | None = None,
+                             source_id: str | None = None,
+                             fallback_concepts: list[str] | None = None,
+                             query: str | None = None, operation: str | None = None,
+                             include_pending: bool = False, valid_at: str | None = None,
+                             known_at: str | None = None, backend: str | None = None,
+                             pending_capture_id: str | None = None,
+                             pending_sequences: list[int] | None = None,
+                             pending_hint_sequences: list[int] | None = None,
+                             pending_spans: list[dict] | None = None,
+                             pending_whole_capture: bool = False,
+                             backend_config: Path | str | None = None,
+                             structured_math: bool = False, confirmed_concept: str | None = None,
+                             selection_receipt: str | None = None, selection_basis: str | None = None,
+                             selection_abstain: str | None = None, point_records: bool = False,
+                             include_recap: bool = False, recap_concepts: list[str] | None = None,
+                             teaching_turn: bool = False) -> dict:
+    # The unified reader only reads derived state. Missing or stale components
+    # are explicit; maintenance belongs to capture/postcommit, never tutoring.
     if offset:
-        return {'status':'full_history_requires_explicit_read','records':[]}
-    return math_learning_profiles.resolve(repo_root, concepts, view, max_bytes)
+        return {'status': 'full_history_requires_explicit_read', 'records': []}
+    import math_memory_context
+    native_known = None if teaching_turn else known_version
+    result = math_memory_context.resolve(repo_root, concepts, view, max_bytes,
+        known_version=None if include_recap or recap_concepts else native_known, formal_id=formal_id, source_id=source_id,
+        fallback_concepts=fallback_concepts, query=query, operation=operation,
+        include_pending=include_pending, valid_at=valid_at, known_at=known_at,
+        backend=backend, pending_capture_id=pending_capture_id,
+        pending_sequences=pending_sequences, pending_hint_sequences=pending_hint_sequences,
+        pending_spans=pending_spans, pending_whole_capture=pending_whole_capture,
+        backend_config=backend_config,structured_math=structured_math,confirmed_concept=confirmed_concept,
+        selection_receipt=selection_receipt,selection_basis=selection_basis,
+        selection_abstain=selection_abstain,point_records=point_records)
+    if not teaching_turn:
+        try:
+            bridge = str(math_runtime_paths.bridge_root(Path(repo_root)))
+            if bridge not in sys.path:
+                sys.path.insert(0, bridge)
+            from study_visual_dispatch import attach_protocol
+            identity = result.get("identity")
+            current_id = ((identity.get("formal_id") or identity.get("source_question_id"))
+                          if isinstance(identity, dict) else None)
+            result = attach_protocol(result, "math", current_id=current_id,
+                source_version=result.get("source_version") or result.get("version"),
+                max_bytes=max_bytes)
+        except (ImportError, OSError, ValueError, TypeError, RuntimeError):
+            pass
+    if include_recap or recap_concepts:
+        import math_recap
+        result = math_recap.attach(result, repo_root, concepts=recap_concepts or concepts, formal_id=formal_id,
+            source_id=source_id, operation=operation, view=view,
+            known_version=native_known, max_bytes=max_bytes)
+    if teaching_turn:
+        from math_tutoring_inputs import teaching_inputs
+        result = teaching_inputs(result, max_bytes, repo=repo_root, operation=operation,
+                                 known_version=known_version, add_exact=not (valid_at or known_at or point_records))
+    return result
+
+
+def _pending_span(value: str) -> dict:
+    parts = value.split(':')
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise argparse.ArgumentTypeError('expected SEQUENCE:START:END (Unicode characters; end exclusive)')
+    sequence, start, end = map(int, parts)
+    if sequence < 1 or end <= start:
+        raise argparse.ArgumentTypeError('invalid pending span bounds')
+    return {'sequence': sequence, 'start': start, 'end': end}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1171,11 +1233,43 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--formal-id", help="Optional exact-card history route; new questions use --concept")
     resolve.add_argument('--source-question-id', help='Exact printed source ID; zero match is a new source')
     resolve.add_argument('--known-version', help='Reuse this same-question response when unchanged')
+    resolve.add_argument('--audit-context', action='store_true',
+                         help='Describe the exact bounded stdout JSON on stderr (isolated evaluation)')
+    resolve.add_argument('--query', help='Scoped natural-language query; exact identities still take priority')
+    resolve.add_argument('--structured-math-query', action='store_true', dest='structured_math',
+                         help='Query is an assistant-authored object/goal/given-conditions description, never a user quotation')
+    resolve.add_argument('--confirmed-concept',help='One inspected candidate selected by the current assistant after mathematical scope checking')
+    resolve.add_argument('--selection-receipt',help='Discovery receipt binding question, view, source version and inspected candidates')
+    resolve.add_argument('--selection-basis',help='Brief object/goal/condition match; not a mastery judgment')
+    resolve.add_argument('--selection-abstain',choices=['ambiguous','no_match'],help='Current assistant cannot justify one mathematical scope')
+    resolve.add_argument('--point-records',action='store_true',help='Explicit bounded history preview for the one selected concept; not a request for one guessed episode')
+    resolve.add_argument('--backend-config', type=Path, help='Explicit isolated backend configuration; does not modify production settings')
+    resolve.add_argument('--operation', help='Current operation/subquestion for scope checking and cache identity')
+    resolve.add_argument('--for-teaching', action='store_true',
+                         help='Return scoped teaching roles and the local math visual entry')
+    resolve.add_argument('--include-pending', action='store_true', help='Read saved unadjudicated evidence separately')
+    resolve.add_argument('--include-recap', action='store_true',
+                         help='Include source-checked basic formulas, secondary conclusions and methods; preserve current view and subquestion scope')
+    resolve.add_argument('--recap-concept', action='append', dest='recap_concepts',
+                         help='Verified reference name/ID for the recap; separate from the learner fine-point --concept; implies --include-recap')
+    resolve.add_argument('--pending-capture-id', help='Exact saved Capture; direct view still requires this question authorization')
+    resolve.add_argument('--pending-sequence', type=int, action='append', dest='pending_sequences',
+                         help='Authorized complete USER message sequence; repeat for explicitly scoped turns')
+    resolve.add_argument('--pending-hint-sequence', type=int, action='append', dest='pending_hint_sequences',
+                         help='Separately authorized complete ASSISTANT message; neighboring hints are never implicit')
+    resolve.add_argument('--pending-span', type=_pending_span, action='append', dest='pending_spans',
+                         help='Exact authorized SEQUENCE:START:END span when a message mixes subquestions')
+    resolve.add_argument('--pending-whole-capture', action='store_true',
+                         help='Explicit whole-capture authorization, not implied by a question ID or direct view')
+    resolve.add_argument('--valid-at', help='Historical effective date/time; never infer from file modification time')
+    resolve.add_argument('--known-at', help='Only evidence known by this date/time')
     resolve.add_argument('--full-evidence', action='store_true', help='Explicit maintenance/history read, outside normal teaching')
     resolve.add_argument("--concept", action="append", dest="concepts",
                          help="Knowledge label, alias or stable key extracted from the current problem; repeat for multiple concepts")
-    resolve.add_argument("--max-bytes", type=int, default=4500,
-                         help="Combined UTF-8 budget for prepared teaching summaries (default 4500)")
+    resolve.add_argument("--fallback-concept", action="append", dest="fallback_concepts",
+                         help="Known related label or parent scope to read if the primary concept is unmatched")
+    resolve.add_argument("--max-bytes", type=int, default=12000,
+                         help="Combined UTF-8 budget for prepared teaching summaries (default 12000)")
     resolve.add_argument("--offset", type=int, default=0)
     resolve.add_argument("--material-limit", type=int, default=1,
                          help="Maximum reference-only items per concept page; default 1 leaves room for personal history")
@@ -1194,16 +1288,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    audit = args.command == "resolve" and args.audit_context
+    if audit:
+        if args.full_evidence:
+            parser.error("--audit-context requires the bounded resolve path")
+        from math_teaching_delivery import emit_audit, perf_counter_ns
+        began_ns = perf_counter_ns()
     try:
         if args.command == "materialize":
             result = materialize_context(args.repo, _load_input(Path(args.input)))
             code = 0
         elif args.command == "resolve":
-            if not args.full_evidence and (args.concepts or args.formal_id or args.source_question_id):
+            args.include_recap = args.include_recap or bool(args.recap_concepts)
+            if (args.offset or args.expected_version) and not (args.full_evidence and args.concepts):
+                raise TeachingContextError("pagination_requires_full_evidence_and_concept", "resolve")
+            if args.offset and not args.expected_version:
+                raise TeachingContextError("pagination_requires_expected_version", "resolve")
+            pending_selected = bool(args.pending_sequences or args.pending_hint_sequences or args.pending_spans or args.pending_whole_capture)
+            if args.full_evidence and (args.query or args.operation or args.structured_math or args.include_pending or args.include_recap or args.pending_capture_id or pending_selected or args.valid_at or args.known_at or args.for_teaching):
+                raise TeachingContextError("full_evidence_scope_options_unsupported", "use the bounded memory reader")
+            if not args.full_evidence and (args.concepts or args.formal_id or args.source_question_id or args.query or args.pending_capture_id):
                 import math_learning_profiles
-                result = math_learning_profiles.resolve(args.repo,args.concepts or [],args.view,args.max_bytes,
-                    args.known_version,args.formal_id,args.source_question_id)
+                result = resolve_teaching_concepts(args.repo,args.concepts or [],args.view,args.max_bytes,
+                    known_version=args.known_version,formal_id=args.formal_id,source_id=args.source_question_id,
+                    fallback_concepts=args.fallback_concepts, query=args.query, operation=args.operation,
+                    include_pending=args.include_pending or bool(args.pending_capture_id) or pending_selected,
+                    pending_capture_id=args.pending_capture_id, valid_at=args.valid_at, known_at=args.known_at,
+                    pending_sequences=args.pending_sequences, pending_hint_sequences=args.pending_hint_sequences,
+                    pending_spans=args.pending_spans, pending_whole_capture=args.pending_whole_capture,
+                    backend_config=args.backend_config,structured_math=args.structured_math,
+                    confirmed_concept=args.confirmed_concept,selection_receipt=args.selection_receipt,
+                    selection_basis=args.selection_basis,selection_abstain=args.selection_abstain,
+                    point_records=args.point_records, include_recap=args.include_recap,
+                    recap_concepts=args.recap_concepts, teaching_turn=args.for_teaching)
             elif args.concepts:
                 import math_concept_index
                 result = math_concept_index.resolve_concepts(
@@ -1232,7 +1351,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = {"schema_version": "math-teaching-context-error-v1", "status": "unavailable",
                   "reason_code": "personal_context_unavailable", "reason": str(exc)}
         code = 2
-    if args.command == "resolve" and args.concepts:
+    if audit:
+        emit_audit(result, args=args, began_ns=began_ns, exit_status=code)
+    elif args.command == "resolve" and (args.concepts or args.query):
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     else:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))

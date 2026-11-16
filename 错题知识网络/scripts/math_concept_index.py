@@ -8,6 +8,7 @@ The resolver reads SQLite plus source/directory stamps, not the card library.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import importlib
@@ -20,9 +21,11 @@ from pathlib import Path
 from typing import Any
 
 import wrongnet
+import math_exam_context
 
 SCHEMA = "math-concept-index-v1"
-IMPLEMENTATION = 11
+ATOMIC_OBSERVATION_IMPLEMENTATION = 16
+IMPLEMENTATION = ATOMIC_OBSERVATION_IMPLEMENTATION
 BASE = Path("错题知识网络")
 INDEX = BASE / "个人知识点索引/index.sqlite3"
 ALIASES = BASE / "schema/math_concept_aliases.json"
@@ -31,7 +34,7 @@ STORES = [Path("数学一回滚复习系统/复习单元.json"),
           Path("数学一回滚复习系统/复习记录.jsonl"),
           Path("数学一回滚复习系统/快速入库事件.jsonl"), ALIASES,
           BASE / "生成/wrong_questions.json", BASE / "个人知识点索引/formal_commit_epoch.json"]
-HOT_STORES = [STORES[0], STORES[1], ALIASES, STORES[5]]
+HOT_STORES = [STORES[0], STORES[1], ALIASES, STORES[5], *math_exam_context.FILES]
 BUILD_ONLY_PATHS = ("数学一回滚复习系统/快速入库事件.jsonl", "数学一回滚复习系统/快速入库来源",
                     "数学一回滚复习系统/原始会话归档回执.jsonl",
                     "数学一回滚复习系统/原始会话归档意图", "数学一回滚复习系统/历史证据归档指针")
@@ -86,7 +89,7 @@ def _json_rows(text: str, suffix: str) -> list[dict]:
     if not text.strip():
         return []
     if suffix == ".jsonl":
-        values = [json.loads(line) for line in text.splitlines() if line.strip()]
+        values = [json.loads(line) for line in text.split("\n") if line.strip()]
     else:
         value = json.loads(text)
         values = value if isinstance(value, list) else value.get("units", value.get("cards", []))
@@ -98,6 +101,8 @@ def _directories(root: Path, extra: tuple = ()) -> dict[str, Any]:
     paths = [BASE / "错题卡", BASE / "wiki/concepts", BASE / "wiki/topics/knowledge_clusters",
              BASE / "方法论库", BASE / "知识树", BASE / "学习记录",
              BASE / "个人知识点索引/正式逐点观测", BASE / "个人知识点索引/语义概况",
+             BASE / "个人知识点索引/做题方法",
+             BASE / "个人知识点索引/记忆维护/transactions",
              Path("数学一回滚复习系统/知识点复盘/正式会话")] + [Path(p) for p in extra]
     result = {}
     for rel in paths:
@@ -153,15 +158,18 @@ def _db(path: Path) -> sqlite3.Connection:
       CREATE TABLE IF NOT EXISTS concepts (key TEXT PRIMARY KEY, label TEXT, normalized TEXT, payload TEXT);
       CREATE TABLE IF NOT EXISTS lookup (name TEXT, key TEXT, PRIMARY KEY(name,key));
       CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, formal_id TEXT, payload TEXT);
+      CREATE INDEX IF NOT EXISTS records_formal_id ON records(formal_id);
       CREATE TABLE IF NOT EXISTS membership (key TEXT, record_id TEXT, PRIMARY KEY(key,record_id));
       CREATE INDEX IF NOT EXISTS membership_key ON membership(key);
       CREATE TABLE IF NOT EXISTS source_identities (source_id TEXT, formal_id TEXT, card_path TEXT, PRIMARY KEY(source_id,formal_id));
       CREATE TABLE IF NOT EXISTS teaching_profiles (key TEXT, view TEXT, payload TEXT, PRIMARY KEY(key,view));
     """)
+    import math_memory_projection
+    math_memory_projection.ensure_tables(connection)
     return connection
 
 
-def build_index(repo_root: str | Path, affected_ids: list[str] | None = None) -> dict:
+def build_index(repo_root: str | Path, affected_ids: list[str] | None = None, *, force_full: bool = False) -> dict:
     """Atomically refresh complete coverage, reusing unchanged parsed sources.
 
     affected_ids is an optimization hint only, never a coverage restriction.
@@ -175,30 +183,58 @@ def build_index(repo_root: str | Path, affected_ids: list[str] | None = None) ->
         fcntl.flock(lock, fcntl.LOCK_EX)
         conn = _db(target)
         try:
-            return _build(root, conn, affected_ids)
+            result = _build(root, conn, affected_ids, force_full=force_full)
+            import math_memory_projection
+            math_memory_projection.record_ready(root, conn, result['version'])
+            return result
         finally:
             conn.close()
 
 
-def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None) -> dict:
+def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None, *, force_full: bool = False) -> dict:
+    import math_memory_projection as projection
     previous = dict(conn.execute("SELECT key,value FROM meta"))
+    if not force_full:
+        unchanged = projection.unchanged_receipt(root, conn, previous, affected_ids)
+        if unchanged is not None:
+            return unchanged
     cached = {row[0]: row[1:] for row in conn.execute("SELECT path,stamp,sha256,payload FROM sources")}
+    compatible = previous.get("implementation") == canonical(IMPLEMENTATION)
+    previous_concepts = {key: json.loads(payload) for key, payload in conn.execute("SELECT key,payload FROM concepts")} if compatible else {}
+    previous_records = {key: json.loads(payload) for key, payload in conn.execute("SELECT id,payload FROM records")} if compatible else {}
+    previous_hot = list(conn.execute("SELECT key,view,payload FROM teaching_profiles")) if compatible else []
+    previous_dependencies = {}
+    if compatible:
+        for key, path in conn.execute("SELECT key,path FROM profile_dependencies"):
+            previous_dependencies.setdefault(key, set()).add(path)
     sources: dict[str, dict] = {}
     parsed_count = 0
     hashed_count = 0
     reused_count = 0
+    exam_stamps = {str(p): _stamp(root / p) for p in math_exam_context.FILES}
 
     def read(path: Path, kind: str) -> dict:
         nonlocal parsed_count, hashed_count, reused_count
         rel = str(path.relative_to(root))
         before = _stamp(path)
+        in_flight = sources.get(rel)
+        if in_flight and in_flight['stamp'] != before:
+            raise RuntimeError('source_changed_during_build: '+rel)
+        if (in_flight and in_flight['stamp'] == before
+                and (kind == 'external' or in_flight['payload'].get('kind') == kind)):
+            # A later method/source guard needs the verified bytes/hash, not a
+            # weaker parser that destroys the card identity cached above.
+            reused_count += 1
+            return in_flight
         old = cached.get(rel)
         compatible = previous.get("implementation") == canonical(IMPLEMENTATION)
-        if old and compatible and json.loads(old[0]) == before:
+        old_payload = json.loads(old[2]) if old else None
+        role_compatible = old_payload is not None and (kind == 'external' or old_payload.get('kind') == kind)
+        if old and compatible and role_compatible and json.loads(old[0]) == before:
             # Only hashes already proven by a complete prior read may take this
             # path. ctime also invalidates same-size writes with restored mtime.
             sha = old[1]
-            payload = json.loads(old[2])
+            payload = old_payload
             reused_count += 1
         else:
             raw = path.read_bytes()
@@ -206,8 +242,8 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
             if before != _stamp(path):
                 raise RuntimeError("source_changed_during_build: " + rel)
             sha = hashlib.sha256(raw).hexdigest()
-            if old and compatible and old[1] == sha:
-                payload = json.loads(old[2])
+            if old and compatible and role_compatible and old[1] == sha:
+                payload = old_payload
                 source = {"path": rel, "stamp": before, "sha256": sha, "payload": payload}
                 sources[rel] = source
                 return source
@@ -245,6 +281,13 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
                     text = ""
                 elif path.name == "wrong_questions.json":
                     text = canonical([{"id": row.get("id", row.get("meta", {}).get("id"))} for row in _json_rows(text, ".json")])
+                elif path == root / ALIASES:
+                    config = json.loads(text)
+                    clean = _safe(config)
+                    # Declared lookup names are configuration, not answer-bearing
+                    # evidence fields: e.g. 解析式 is a legitimate math phrase.
+                    clean["aliases"] = config.get("aliases", {})
+                    text = canonical(clean)
                 elif path.suffix == ".jsonl":
                     text = "\n".join(canonical(_safe(row)) for row in _json_rows(text, ".jsonl"))
                 else:
@@ -258,7 +301,11 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
                 payload = {"kind": kind, "text": text}
             parsed_count += 1
         source = {"path": rel, "stamp": before, "sha256": sha, "payload": payload}
-        sources[rel] = source
+        # One source can be used in several roles.  Keep the richest canonical
+        # typed parse in SQLite while returning the requested parse to callers.
+        priority = {'external':0, 'material':1, 'store':2, 'card':3}
+        if not in_flight or priority.get(payload.get('kind'), 0) >= priority.get(in_flight['payload'].get('kind'), 0):
+            sources[rel] = source
         return source
 
     import math_formal_observations
@@ -297,7 +344,7 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
     def register(label: str) -> str:
         label = unicodedata.normalize("NFKC", str(label)).strip()
         key = concept_key(label)
-        concepts.setdefault(key, {"key": key, "label": label, "source_refs": [], "wiki_ids": []})
+        concepts.setdefault(key, {"key": key, "label": label, "source_refs": [], "wiki_ids": [], "wiki_paths": []})
         names.setdefault(normalize(label), set()).add(key)
         names.setdefault(normalize(key), set()).add(key)
         return key
@@ -341,6 +388,19 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
         labels = list(dict.fromkeys([str(x) for x in payload["labels"] + _items(overlays.get(fid)) if str(x).strip()]))
         source_ref = {"path": source["path"], "sha256": source["sha256"]}
         events = reviews_by_card.get(fid, [])
+        old_record = previous_records.get(fid)
+        old_history = old_record.get('history', {}) if old_record else {}
+        if (not force_full and old_record and old_record.get('labels') == labels
+                and source_ref in old_record.get('source_refs', [])
+                and old_history.get('review_events', []) == events
+                and old_history.get('review_units', []) == unit_by_card.get(fid, [])
+                and old_history.get('related_unit_events', []) == related_unit_events.get(fid, [])):
+            retained = copy.deepcopy(old_record)
+            retained['source_refs'] = [{**ref, 'sha256':sources[ref['path']]['sha256']}
+                if ref['path'] in (units_rel,reviews_rel) and ref['path'] in sources else ref
+                for ref in retained['source_refs']]
+            link(retained, labels)
+            continue
         chronological = sorted([event for event in events if _evidence_date(event["event"])],
                                key=lambda event: (_evidence_date(event["event"]), event["ordinal"]))
         personal = payload["personal"]
@@ -405,8 +465,13 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
         for path in sorted((root / BASE / folder).rglob("*.md")):
             source = read(path, "material")
             material_sources.append({"path": source["path"], "sha256": source["sha256"], **source["payload"]})
+    source_collection = {'mode':'unavailable'}
     if extension is not None:
-        for item in extension.collect_sources(root):
+        if getattr(extension, 'SUPPORTS_INCREMENTAL', False):
+            external_items = extension.collect_sources(root, changed_formal_ids=affected_ids if compatible else None, stats=source_collection)
+        else:
+            external_items = extension.collect_sources(root)
+        for item in external_items:
             path = root / item["path"]
             if path.is_file() and item["path"] not in sources:
                 read(path, "external")
@@ -442,6 +507,7 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
                 key = register(label)
                 names.setdefault(normalize(wiki_id), set()).add(key)
                 concepts[key]["wiki_ids"].append(wiki_id)
+                concepts[key]['wiki_paths'].append(material['path'])
         if not labels and material.get("title"):
             labels = [material["title"]]
         record = {"record_id": "source:" + digest(identity)[:24], "formal_id": None,
@@ -461,8 +527,27 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
             raise ValueError("concept_review_binding_mismatch")
         link(record, record["labels"])
 
+    formal_recorded = {event['event_id']: event.get('closed_at') or event.get('recorded_at')
+                       for _, event, _ in formal_observation_sources}
     for record in math_formal_observations.collect_records(root, read, formal_observation_sources):
+        recorded = formal_recorded.get(record['summary']['event_id'])
+        if recorded:
+            record['summary']['recorded_at'] = recorded
         link(record, record["labels"])
+
+    import math_memory_lifecycle
+    maintenance_by_key = {}
+    for transaction in math_memory_lifecycle.transactions(root):
+        path = math_memory_lifecycle.TRANSACTIONS / (math_memory_lifecycle.digest(transaction['request_id'])+'.json')
+        source = read(root/path, 'external')
+        for correction in transaction['corrections']:
+            refs = maintenance_by_key.setdefault(correction['concept_key'], {})
+            refs[str(path)] = source['sha256']
+            for ref in correction.get('source_refs', []):
+                evidence = read(root/ref['path'], 'external')
+                if evidence['sha256'] != ref['sha256']:
+                    raise RuntimeError('memory_correction_source_changed:'+ref['path'])
+                refs[ref['path']] = evidence['sha256']
 
     alias_problems = []
     for alias, raw in aliases.items():
@@ -482,12 +567,30 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
             continue
         names.setdefault(normalize(alias), set()).update(resolved)
 
+    members_by_key = {}
+    for key, rid in membership:
+        members_by_key.setdefault(key, []).append(rid)
+    # Each record's canonical evidence bytes are independent of its many
+    # memberships.  Encode once, then hash the same canonical list framing.
+    record_basis_bytes = {rid: canonical(projection.record_semantic_basis(record)).encode()
+                          for rid, record in records.items()}
     for key, concept in concepts.items():
-        linked = sorted(rid for k, rid in membership if k == key)
+        linked = sorted(members_by_key.get(key, ()))
         concept["formal_ids"] = sorted({records[rid]["formal_id"] for rid in linked if records[rid]["formal_id"]})
-        concept["content_sha256"] = digest([records[rid] for rid in linked])
+        import math_memory_projection as projection
+        content_hash = hashlib.sha256(b'[[')
+        for position, rid in enumerate(linked):
+            if position:
+                content_hash.update(b',')
+            content_hash.update(record_basis_bytes[rid])
+        content_hash.update(b'],')
+        content_hash.update(canonical(maintenance_by_key.get(key, {})).encode())
+        content_hash.update(b']')
+        concept['content_sha256'] = content_hash.hexdigest()
         concept["wiki_ids"] = sorted(set(concept["wiki_ids"]))
-        reviews = [records[rid] for rid in linked if records[rid].get("kind") == "concept_review"]
+        concept['wiki_paths'] = sorted(set(concept['wiki_paths']))
+        reviews = projection.effective_point_records(root,
+            [records[rid] for rid in linked if records[rid].get("kind") == "concept_review"], key)
         concept["review_markers"] = {
             "session_count": len(reviews),
             "wrong_session_count": sum(row["summary"]["wrong_session_count"] for row in reviews),
@@ -495,8 +598,71 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
             "latest_study_date": max((row["summary"]["study_date"] for row in reviews), default=None),
             "count_scope": "new_concept_review_sessions_only_not_card_history"}
         concept["review_page"] = str(math_concept_review.PAGES / (key + ".md"))
+    del record_basis_bytes
     import math_learning_profiles
-    hot_profiles = math_learning_profiles.enrich_index(root, concepts, records, sources, membership, read)
+    # Semantic compilation is scoped even when maintenance verifies the source
+    # inventory.  Global catalog/alias changes legitimately invalidate all
+    # concepts; ordinary card/profile changes do not regenerate unrelated pages.
+    changed_sources = {path for path, source in sources.items()
+                       if path not in cached or cached[path][1] != source['sha256']}
+    deleted_sources = {path for path in cached if not (root/path).is_file()}
+    import math_problem_methods
+    registry_paths = previous_dependencies.get('__registry__', set())
+    registry_changed = (force_full or not compatible or bool((changed_sources | deleted_sources) & registry_paths)
+                        or any(path not in cached or _stamp(root/path) != json.loads(cached[path][0])
+                               for path in registry_paths)
+                        or any((root/path).is_file() and str(path) not in cached for path in
+                               (math_problem_methods.CATALOG, math_problem_methods.BINDINGS, *math_exam_context.FILES))
+                        or any(str(path) in changed_sources for path in
+                               (ALIASES, math_problem_methods.CATALOG, math_problem_methods.BINDINGS)))
+    selected = set(concepts) if registry_changed else {
+        key for key, value in concepts.items()
+        if key not in previous_concepts
+        or value['content_sha256'] != previous_concepts[key].get('content_sha256')
+        or value.get('wiki_ids') != previous_concepts[key].get('wiki_ids')
+        or any(_stamp(root/path) != json.loads(cached[path][0])
+               for path in previous_dependencies.get(key, ()) if path in cached)
+        or (root/math_learning_profiles.SEMANTIC/(key+'.json')).is_file()
+           and str(math_learning_profiles.SEMANTIC/(key+'.json')) not in cached}
+    dependencies = {key: set(paths) for key, paths in previous_dependencies.items()
+                    if key in concepts and key not in selected}
+    # Unchanged point projections retain their exact verified sources.  Reusing
+    # a source with drift is forbidden; it would have selected the point above.
+    for key in set(concepts)-selected:
+        for field in ('learning_profile', 'reference_anchors'):
+            if field in previous_concepts[key]:
+                concepts[key][field] = previous_concepts[key][field]
+        for path in previous_dependencies.get(key, ()):
+            if path not in sources:
+                if path not in cached:
+                    raise RuntimeError('source_changed_during_build:'+path)
+                old = cached[path]
+                old_stamp = json.loads(old[0])
+                current_stamp = _stamp(root/path)
+                if current_stamp != old_stamp:
+                    # A generated page can receive macOS metadata after the
+                    # dependency-selection pass. Keep its prior proof here;
+                    # the existing final guard below must rehash its bytes.
+                    generated_page = path.startswith(str(math_learning_profiles.PAGES) + '/')
+                    metadata_only = (generated_page and current_stamp is not None and old_stamp is not None
+                        and [current_stamp[i] for i in (0, 1, 3)] == [old_stamp[i] for i in (0, 1, 3)])
+                    if not metadata_only:
+                        raise RuntimeError('source_changed_during_build:'+path)
+                sources[path] = {'path':path,'stamp':old_stamp,'sha256':old[1],'payload':json.loads(old[2])}
+    # Reuse textbook attachments for card records when the catalog is unchanged.
+    if not registry_changed:
+        for rid, record in records.items():
+            old_method = previous_records.get(rid, {}).get('metadata', {}).get('problem_solving')
+            if old_method is not None:
+                record.setdefault('metadata', {})['problem_solving'] = old_method
+    generated_hot = math_learning_profiles.enrich_index(root, concepts, records, sources, membership, read,
+        only_keys=selected, refresh_registry=registry_changed, dependency_sets=dependencies)
+    for key, refs in maintenance_by_key.items():
+        if key in concepts:
+            dependencies.setdefault(key, set()).update(refs)
+            dependencies.setdefault('__correction__:'+key, set()).update(refs)
+    hot_profiles = ([row for row in previous_hot if row[0] not in selected
+                     and (row[0] in concepts or not registry_changed and not row[0].startswith('MATH-CONCEPT-'))] + generated_hot)
     source_identities = set()
     for fid, source in cards.items():
         identity = source['payload'].get('source_identity', {})
@@ -527,32 +693,65 @@ def _build(root: Path, conn: sqlite3.Connection, affected_ids: list[str] | None)
     version = digest({"schema": SCHEMA, "implementation": IMPLEMENTATION, "sources": source_hashes, "records": records,
                       "names": {k: sorted(v) for k, v in names.items()}, "teaching_profiles":sorted(hot_profiles)})
     stamps = {str(rel): _stamp(root / rel) for rel in HOT_STORES}
+    # macOS may attach metadata to a freshly generated learning page after its
+    # atomic write. Only these build-owned outputs may accept a ctime-only
+    # transition, and only after reading and hashing the exact bytes again.
+    # Formal inputs retain the strict stamp gate (including ctime).
+    profile_prefix = str(math_learning_profiles.PAGES) + "/"
+    for path, source in sources.items():
+        if not path.startswith(profile_prefix):
+            continue
+        current = _stamp(root / path)
+        before = source["stamp"]
+        if current == before:
+            continue
+        if (current is not None and before is not None
+                and [current[i] for i in (0, 1, 3)] == [before[i] for i in (0, 1, 3)]
+                and hashlib.sha256((root / path).read_bytes()).hexdigest() == source["sha256"]
+                and _stamp(root / path) == current):
+            source["stamp"] = current
     # Reject a changing snapshot rather than committing a mixture of source versions.
-    if directories != _directories(root, extra_watch) or any(_stamp(root / p) != s["stamp"] for p, s in sources.items()):
+    if (directories != _directories(root, extra_watch)
+            or any(_stamp(root / p) != s["stamp"] for p, s in sources.items())
+            or any(_stamp(root / p) != stamp for p, stamp in exam_stamps.items())):
         raise RuntimeError("source_changed_during_build")
     receipt = {"schema": SCHEMA, "status": "noop" if previous.get("version") == canonical(version) else "ready",
                "version": version, "index_path": str(INDEX), "coverage": coverage,
                "concept_count": len(concepts), "record_count": len(records),
                "source_hashes": source_hashes, "alias_problems": alias_problems,
                "parsed_sources": parsed_count, "hashed_sources": hashed_count,
-               "stat_reused_sources": reused_count, "affected_ids_hint": affected_ids or []}
+               "stat_reused_sources": reused_count, "affected_ids_hint": affected_ids or [],
+               "projection_mode": "full" if registry_changed else "incremental",
+               "source_collection": source_collection,
+               "recomputed_concept_keys": sorted(selected),
+               "recomputed_concept_count": len(selected),
+               "retained_concept_count": len(concepts)-len(selected),
+               "full_reason": "explicit_full_repair" if force_full else "initial_or_implementation_change" if not compatible else
+                              "shared_registry_or_alias_change" if registry_changed else None}
     with conn:
-        for table in ("meta", "sources", "concepts", "lookup", "records", "membership", "source_identities", "teaching_profiles"):
-            conn.execute("DELETE FROM " + table)
-        for key, value in {"schema": SCHEMA, "implementation": IMPLEMENTATION, "version": version, "receipt": receipt,
+        metadata = {"schema": SCHEMA, "implementation": IMPLEMENTATION, "version": version, "receipt": receipt,
                            "directories": directories, "store_stamps": stamps,
+                           "query_directories": projection.query_directories(root),
+                           "maintenance_guard": projection.maintenance_guard(root),
                            "coverage": {k: v for k, v in coverage.items() if k not in {"expected_ids", "observed_ids", "excluded"}},
                            "alias_problems": alias_problems,
                            "scope_notes": alias_data.get("scope_notes", {}),
-                           "require_scope_check": alias_data.get("require_scope_check", [])}.items():
-            conn.execute("INSERT INTO meta VALUES (?,?)", (key, canonical(value)))
-        conn.executemany("INSERT INTO sources VALUES (?,?,?,?)", [(p, canonical(s["stamp"]), s["sha256"], canonical(s["payload"])) for p, s in sources.items()])
-        conn.executemany("INSERT INTO concepts VALUES (?,?,?,?)", [(k, c["label"], normalize(c["label"]), canonical(c)) for k, c in concepts.items()])
-        conn.executemany("INSERT INTO lookup VALUES (?,?)", [(name, key) for name, keys in names.items() for key in keys])
-        conn.executemany("INSERT INTO records VALUES (?,?,?)", [(rid, record["formal_id"], canonical(record)) for rid, record in records.items()])
-        conn.executemany("INSERT INTO membership VALUES (?,?)", sorted(membership))
-        conn.executemany('INSERT INTO source_identities VALUES (?,?,?)', sorted(source_identities))
-        conn.executemany('INSERT INTO teaching_profiles VALUES (?,?,?)', hot_profiles)
+                           "require_scope_check": alias_data.get("require_scope_check", [])}
+        deltas = {}
+        for table, columns, rows, primary in (
+            ('sources', ('path','stamp','sha256','payload'), [(p,canonical(s['stamp']),s['sha256'],canonical(s['payload'])) for p,s in sources.items()], (0,)),
+            ('concepts', ('key','label','normalized','payload'), [(k,c['label'],normalize(c['label']),canonical(c)) for k,c in concepts.items()], (0,)),
+            ('lookup', ('name','key'), [(name,key) for name,keys in names.items() for key in keys], (0,1)),
+            ('records', ('id','formal_id','payload'), [(rid,r['formal_id'],canonical(r)) for rid,r in records.items()], (0,)),
+            ('membership', ('key','record_id'), sorted(membership), (0,1)),
+            ('source_identities', ('source_id','formal_id','card_path'), sorted(source_identities), (0,1)),
+            ('teaching_profiles', ('key','view','payload'), hot_profiles, (0,1)),
+            ('profile_dependencies', ('key','path'), [(key,p) for key,paths in dependencies.items() for p in paths], (0,1))):
+            deltas[table] = projection.update_rows(conn, table, columns, rows, primary)
+        receipt['table_deltas'] = deltas
+        if previous.get('version') == canonical(version) and 'receipt' in previous:
+            metadata['receipt'] = json.loads(previous['receipt'])
+        projection.update_rows(conn, 'meta', ('key','value'), [(k,canonical(v)) for k,v in metadata.items()], (0,))
     return receipt
 
 
@@ -560,7 +759,8 @@ def is_personal_record(record: dict) -> bool:
     return record.get("formal_id") is not None or record.get("kind") == "concept_review"
 
 
-def point_history(repo_root: str | Path, concept_keys: list[str] | None = None) -> dict:
+def point_history(repo_root: str | Path, concept_keys: list[str] | None = None, *,
+                  valid_at: str | None = None, known_at: str | None = None) -> dict:
     """Read explicit point events from one current snapshot, never infer card errors.
 
     This maintenance/selection API includes complete saved evidence and is not
@@ -602,13 +802,25 @@ def point_history(repo_root: str | Path, concept_keys: list[str] | None = None) 
                 rows = summary["observations"]
                 events.append({"event_id": summary["event_id"], "event_type": "formal_intake" if record["kind"] == "formal_concept_observation" else "concept_review",
                                "study_date": summary["study_date"], "episode_id": summary.get("episode_id", summary["event_id"]),
+                               "recorded_at": summary.get('recorded_at'),
                                "outcomes": [row["outcome"] for row in rows], "error_details": [row["error_detail"] for row in rows if row["error_detail"]],
                                "source_refs": record["source_refs"], "related_formal_ids": summary["related_formal_ids"],
                                "observations": rows, "history": record["history"], "source_ordinal": summary.get("source_ordinal", 0)})
+            import math_memory_lifecycle
+            events = math_memory_lifecycle.apply_observation_corrections(root, events,
+                valid_at=valid_at, known_at=known_at, concept_key=key)
+            history_gaps = [{'event_id': row.get('event_id'), 'reason': row.get('memory_status','event_time_unknown')}
+                            for row in events if row.get('memory_status') == 'known_time_unknown' or not row.get('study_date')]
+            events = [row for row in events if row.get('memory_status') != 'known_time_unknown' and row.get('study_date')]
             events.sort(key=lambda row: (row["study_date"], row["source_ordinal"], row["event_id"]))
+            known_wrong_count = len({row['episode_id'] for row in events if 'wrong' in row['outcomes']})
             point = {"concept_key": key, "label": concept["label"], "formal_ids": concept["formal_ids"], "events": events,
                      "latest_event": events[-1] if events else None,
-                     "wrong_episode_count": len({row["episode_id"] for row in events if "wrong" in row["outcomes"]})}
+                     "wrong_episode_count": None if history_gaps else known_wrong_count,
+                     "known_wrong_episode_count": known_wrong_count,
+                     "history_gaps": history_gaps, "history_complete": not history_gaps,
+                     "memory_version": math_memory_lifecycle.version(root, [key]),
+                     "valid_at": valid_at, "known_at": known_at}
             point["point_source_version"] = digest(point)
             points.append(point)
     return {"status": "ready", "version": identity["version"], "points": points,
@@ -644,6 +856,11 @@ def _bound(result: dict, max_bytes: int) -> dict:
         fallback = {"status": "budget_too_small", "required_min_bytes": result["returned_bytes"]}
         if len(canonical(fallback).encode()) > max_bytes:
             raise ValueError("max_bytes too small for error envelope")
+        # A long source path can make even the empty page exceed its budget.
+        # Preserve explicit pagination state whenever that small envelope fits.
+        empty_page = {**fallback, "returned": 0, "next_cursor": None}
+        if len(canonical(empty_page).encode()) <= max_bytes:
+            return empty_page
         return fallback
     return result
 
@@ -672,7 +889,10 @@ def resolve_concepts(repo_root: str | Path, concepts: list[str], view: str = "pr
         meta = {k: json.loads(v) for k, v in conn.execute("SELECT key,value FROM meta WHERE key IN ('schema','version','directories','store_stamps','coverage','alias_problems','scope_notes','require_scope_check')")}
         if not {"schema", "version", "directories", "store_stamps", "coverage", "alias_problems"}.issubset(meta):
             return _bound({"status": "stale", "reason": "index_not_ready_or_schema_outdated", "records": []}, max_bytes)
-        changed = [p for p, stamp in {**meta["directories"], **meta["store_stamps"]}.items() if _stamp(root/p) != stamp]
+        import math_memory_projection
+        freshness = math_memory_projection.check_query_dependencies(root, conn)
+        changed = freshness['changed_sources']
+        exam_changed = freshness['exam_changed']
         if changed:
             return _bound({"schema": SCHEMA, "status": "stale", "version": meta["version"],
                            "changed_sources": changed, "records": []}, max_bytes)
@@ -693,11 +913,21 @@ def resolve_concepts(repo_root: str | Path, concepts: list[str], view: str = "pr
             if not found:
                 unknown.append(query)
             keys.update(found)
+        freshness = math_memory_projection.check_query_dependencies(root, conn, keys)
+        if freshness['changed_sources']:
+            return _bound({'schema': SCHEMA, 'status': 'stale', 'version': meta['version'],
+                           'changed_sources': freshness['changed_sources'], 'records': []}, max_bytes)
+        exam_changed = sorted(set(exam_changed + freshness['exam_changed']))
         resolved = []
         all_ids = set()
         rows = {}
         for key in sorted(keys):
             concept = json.loads(conn.execute("SELECT payload FROM concepts WHERE key=?", (key,)).fetchone()[0])
+            if exam_changed and view != 'protected' and concept.get('learning_profile'):
+                profile = concept['learning_profile']
+                profile['exam_context'] = math_exam_context.stale(profile.get('exam_context'))
+                if 'exam_frequency' in profile:
+                    profile['exam_frequency'] = math_exam_context.announcement(profile['exam_context'],view=view)
             all_ids.update(concept["formal_ids"])
             resolved.append({k: v for k, v in concept.items() if k not in {"formal_ids", "source_refs"} and (view != 'protected' or k not in {'learning_profile','reference_anchors'})} | {"formal_count": len(concept["formal_ids"])})
             for rid, payload in conn.execute("SELECT r.id,r.payload FROM records r JOIN membership m ON r.id=m.record_id WHERE m.key=?", (key,)):
@@ -724,8 +954,9 @@ def resolve_concepts(repo_root: str | Path, concepts: list[str], view: str = "pr
             projected = _view(rows[rid], view, resolved)
             ordered.append(record_projection(projected, rows[rid], view) if record_projection is not None else projected)
         coverage = meta["coverage"]
+        query_version = digest([meta['version'], {p: _stamp(root/p) for p in exam_changed}]) if exam_changed else meta['version']
         result = {"schema": SCHEMA, "status": "ambiguous_concept" if ambiguous else "unknown_concept" if not keys else "available",
-                  "version": meta["version"], "view": view, "resolved": resolved,
+                  "version": query_version, "view": view, "resolved": resolved,
                   "unknown": unknown, "ambiguous": ambiguous, "query_scope_notes": query_scope,
                   "coverage": {"expected_count": coverage["expected_count"], "observed_count": coverage["observed_count"],
                                "missing_ids": coverage["missing_ids"], "matched_formal_count": len(all_ids),
@@ -749,7 +980,7 @@ def resolve_concepts(repo_root: str | Path, concepts: list[str], view: str = "pr
             result["returned"] = len(result["records"])
             next_offset = offset + result["returned"]
             result["truncated"] = next_offset < len(ordered)
-            result["next_cursor"] = {"offset": next_offset, "version": meta["version"], "query_sha256": digest([sorted(keys), view, material_limit])} if result["truncated"] else None
+            result["next_cursor"] = {"offset": next_offset, "version": query_version, "query_sha256": digest([sorted(keys), view, material_limit])} if result["truncated"] else None
             # Only serialize the complete envelope near the byte limit. Exporting
             # all rows must not repeatedly serialize the ever-growing full table.
             candidate = _bound(dict(result), max_bytes) if accumulated_bytes + 512 > max_bytes else {"status": "available"}
@@ -761,7 +992,7 @@ def resolve_concepts(repo_root: str | Path, concepts: list[str], view: str = "pr
         result["returned"] = len(result["records"])
         next_offset = offset + result["returned"]
         result["truncated"] = next_offset < len(ordered)
-        result["next_cursor"] = {"offset": next_offset, "version": meta["version"], "query_sha256": digest([sorted(keys), view, material_limit])} if result["truncated"] and result["returned"] else None
+        result["next_cursor"] = {"offset": next_offset, "version": query_version, "query_sha256": digest([sorted(keys), view, material_limit])} if result["truncated"] and result["returned"] else None
         if result["truncated"] and not result["returned"]:
             result["status"] = "budget_too_small"
         return _bound(result, max_bytes)
@@ -802,6 +1033,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build")
     build.add_argument("--affected-id", action="append")
+    build.add_argument('--full', action='store_true', help='Explicit full semantic projection for initialization or repair')
     for command in ("resolve", "export"):
         p = sub.add_parser(command)
         p.add_argument("concepts", nargs="+" if command == "resolve" else "*")
@@ -814,7 +1046,7 @@ def main() -> None:
             p.add_argument("--format", choices=["json", "md"], default="json")
     args = parser.parse_args()
     if args.command == "build":
-        result = build_index(args.repo_root, args.affected_id)
+        result = build_index(args.repo_root, args.affected_id, force_full=args.full)
     elif args.command == "resolve":
         result = resolve_concepts(args.repo_root, args.concepts, args.view, args.max_bytes, args.offset)
     else:

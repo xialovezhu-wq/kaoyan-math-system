@@ -116,7 +116,7 @@ def prepare_sources(root):
     path = root / LEDGER
     if not path.exists():
         return []
-    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    events = [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
     invalid = {row.get("closeout_id") for row in events if row.get("event_type") == "closeout_invalidation"}
     prepared = []
     seen = set()

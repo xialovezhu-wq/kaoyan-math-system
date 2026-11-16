@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math_runtime_paths
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ import tempfile
 import unicodedata
 import zipfile
 from typing import Any
+import math_workflow_storage as workflow_storage
 
 
 CURRENT_CONTRACT = "math-final-semantics-and-profiles-v2"
@@ -378,7 +380,7 @@ class PublishedSnapshot:
             if file_sha256(file) != shard["sha256"]:
                 fail("inventory_shard_hash_mismatch", path)
             try:
-                values = [json.loads(line) for line in file.read_text(encoding="utf-8").splitlines() if line.strip()]
+                values = [json.loads(line) for line in file.read_text(encoding="utf-8").split("\n") if line.strip()]
             except (UnicodeError, json.JSONDecodeError) as exc:
                 raise EnhancementInputError(f"invalid_inventory_shard: {path}") from exc
             if len(values) != shard.get("count"):
@@ -462,8 +464,11 @@ class QuickPackages:
                 raise EnhancementInputError(f"local_package_invalid: {package_id}: {exc}") from exc
             if manifest.get("canonical_sha256") != binding["version"]:
                 fail("local_package_version_mismatch", package_id)
+            from math_workflow_storage import WORK_ROOT
+            archive_roots = [bridge_root / "outbox", WORK_ROOT / "传输缓存/outbox"]
             archives = [
-                path for path in (bridge_root / "outbox").glob("*/quick-packs/math/*.zip")
+                path for archive_root in archive_roots
+                for path in archive_root.glob("*/quick-packs/math/*.zip")
                 if path.name.endswith(f"_{package_id}.zip") and file_sha256(path) == binding["zip_sha256"]
             ]
             if not archives:
@@ -498,11 +503,19 @@ class QuickPackages:
                 if key in members:
                     fail("quick_pack_member_name_conflict", key)
                 members[key] = repo / row["path"]
+            question_ids = [row["question_id"] for row in questions]
+            native_identity = manifest.get("source_identity") or {}
+            native_id = native_identity.get("formal_id") or native_identity.get("question_id")
+            # Topic exports use the package ID as a transport locator when a
+            # native ID contains punctuation (e.g. ID:170763). The signed
+            # native manifest still owns the semantic question identity.
+            if question_ids == [package_id] and isinstance(native_id, str) and native_id.strip():
+                question_ids = [native_id]
             self.packages[package_id] = {
                 "binding": binding, "manifest_path": manifest_path,
                 "manifest_sha256": file_sha256(manifest_path), "members": members,
                 "bridge_zip_paths": sorted(str(path.resolve()) for path in archives),
-                "question_ids": [row["question_id"] for row in questions],
+                "question_ids": question_ids,
             }
 
     def expected_advice_pairs(self) -> set[tuple[str, str]]:
@@ -525,7 +538,14 @@ class QuickPackages:
         source = package["members"].get(member)
         if source is None:
             fail("quick_pack_member_not_bound", path)
-        require_file(source, self.repo)
+        if not source.exists() and not source.is_symlink():
+            native = load_json(package["manifest_path"])
+            archived = self.quick.archived_package_directory(package["manifest_path"], native)
+            if archived is None:
+                fail("quick_pack_member_missing_without_verified_archive", path)
+            source = require_file(archived / source.relative_to(package["manifest_path"].parent), archived)
+        else:
+            require_file(source, self.repo)
         if file_sha256(source) != reference["sha256"]:
             fail("quick_pack_member_hash_mismatch", path)
         binding = package["binding"]
@@ -551,15 +571,54 @@ def staged_evidence_path(stage_relative: Path, reference: dict[str, Any]) -> Pat
 
 def replace_profile_refs(profiles: dict[str, Any], mapping: dict[tuple[str, str], str]) -> dict[str, Any]:
     result = json.loads(json.dumps(profiles, ensure_ascii=False))
-    for update in result["updates"]:
-        replaced = []
-        for ref in update["source_refs"]:
-            key = (ref["path"], ref["sha256"])
-            if key not in mapping:
-                fail("profile_reference_mapping_missing", ref["path"])
-            replaced.append({**ref, "path": mapping[key], "sha256": ref["sha256"]})
-        update["source_refs"] = replaced
+    # Use the same traversal as source validation, including authored history
+    # extensions. Only verified reference paths change; their shape and claims
+    # (hash, quote, role, sequence and provenance) remain intact.
+    for located in collect_references(result, "profile_updates.json"):
+        ref = located["ref"]
+        key = (ref["path"], ref["sha256"])
+        if key not in mapping:
+            fail("profile_reference_mapping_missing", ref["path"])
+        ref["path"] = mapping[key]
     return result
+
+
+def finalize_prepared_refs(repo: Path, prepared: dict[str, Any],
+                           stage_relative: Path, final_relative: Path) -> set[str]:
+    """Relocate every typed citation and its frozen guard after preparation."""
+    import math_learning_profiles
+    temporary_prefix = str(stage_relative) + "/"
+    final_prefix = str(final_relative) + "/"
+    inherited_evidence, path_mapping = set(), {}
+    for update in prepared["updates"]:
+        prior_path = repo / math_learning_profiles.SEMANTIC / (update['concept_key'] + '.json')
+        prior = load_json(prior_path) if prior_path.is_file() else {}
+        prior_refs = {
+            (ref['path'], ref['sha256'])
+            for field in ('teaching_preferences', 'step_evidence')
+            for value in prior.get(field, []) for ref in value.get('source_refs', [])
+        }
+        for located in collect_references(update, 'prepared_profiles.json'):
+            ref = located['ref']
+            original = ref['path']
+            if original.startswith(temporary_prefix):
+                destination = final_prefix + original[len(temporary_prefix):]
+                path_mapping[original] = destination
+                ref['path'] = destination
+            else:
+                if (original, ref['sha256']) not in prior_refs:
+                    fail("prepared_profile_reference_not_staged", original)
+                math_learning_profiles.safe_source(repo, ref)
+                inherited_evidence.add(original)
+    # These guards were computed from the temporary paths. The move preserves
+    # each file's bytes/stat; retaining temporary keys would invalidate a later
+    # maintenance read even though the final references are correct.
+    if '_basis_cited_sources' in prepared:
+        prepared['_basis_cited_sources'] = {
+            path_mapping.get(path, path): guard
+            for path, guard in prepared['_basis_cited_sources'].items()
+        }
+    return inherited_evidence
 
 
 def verify_quote(reference: dict[str, Any], source: Path) -> None:
@@ -572,19 +631,35 @@ def verify_quote(reference: dict[str, Any], source: Path) -> None:
         text = source.read_text(encoding="utf-8")
     except UnicodeError as exc:
         raise EnhancementInputError(f"source_quote_unverifiable: {reference['path']}") from exc
-    if quote in text:
-        return
-    # Conversation quotations refer to decoded turns, not JSON escape syntax.
-    # Keep the source bytes/hash intact and require an exact turn substring.
-    if source.name == "conversation.json":
+    if reference.get('role') in ('user', 'assistant'):
+        # A raw text match elsewhere in a conversation does not establish the
+        # quoted role or sequence, even when JSON uses unescaped Unicode.
         try:
             conversation = json.loads(text)
         except json.JSONDecodeError:
             conversation = None
-        turns = conversation.get("turns", []) if isinstance(conversation, dict) else []
-        if any(isinstance(turn, dict) and isinstance(turn.get("text"), str)
-               and quote in turn["text"] for turn in turns):
+        import math_learning_profiles
+        if math_learning_profiles._role_quote_matches(conversation, reference, reference['role']):
             return
+        fail("source_quote_mismatch", reference["path"])
+    if quote in text:
+        return
+    # Conversation quotations refer to decoded turns, not JSON escape syntax.
+    # Keep the source bytes/hash intact and require an exact turn substring.
+    if source.name == "conversation.json" or reference.get("role") == "user":
+        try:
+            conversation = json.loads(text)
+        except json.JSONDecodeError:
+            conversation = None
+        if reference.get("role") == "user":
+            import math_learning_profiles
+            if math_learning_profiles._user_quote_matches(conversation, reference):
+                return
+        else:
+            turns = conversation.get("turns", []) if isinstance(conversation, dict) else []
+            if any(isinstance(turn, dict) and isinstance(turn.get("text"), str)
+                   and quote in turn["text"] for turn in turns):
+                return
     fail("source_quote_mismatch", reference["path"])
 
 
@@ -593,8 +668,9 @@ def validate_topic_batch(repo: Path, manifest: dict[str, Any]) -> dict[str, Any]
     if binding is None:return None
     if not isinstance(binding,dict) or not ID_RE.fullmatch(str(binding.get('batch_id',''))):
         fail('invalid_topic_batch_binding')
-    path=repo/'数学一回滚复习系统/A分包'/binding['batch_id']/'batch-plan.json'
-    require_file(path,repo)
+    path=workflow_storage.ensure_cold_output(
+        repo/'数学一回滚复习系统/A分包'/binding['batch_id']/'batch-plan.json')
+    require_file(path, path.parent)
     if file_sha256(path)!=binding.get('plan_sha256'):fail('topic_batch_plan_hash_mismatch')
     plan=load_json(path)
     groups=[g for g in plan.get('groups',[]) if g.get('shard_id')==binding.get('shard_id')]
@@ -605,7 +681,48 @@ def validate_topic_batch(repo: Path, manifest: dict[str, Any]) -> dict[str, Any]
             or group.get('input_packages')!=manifest.get('input_packages')):
         fail('topic_batch_scope_or_snapshot_mismatch')
     return {**binding,'profile_merge_policy':'deferred_batch_merge',
-            'group_count':len(plan['groups']),'topic':group.get('topic')}
+            'group_count':len(plan['groups']),'topic':group.get('topic'),
+            'method_context':group.get('method_context')}
+
+
+def topic_method_source(repo, batch_binding, reference):
+    """Resolve only exact material members authored in the original batch plan."""
+    if not batch_binding or not batch_binding.get('method_context'):
+        fail('method_context_reference_without_bound_input')
+    context = batch_binding['method_context']
+    entries = [row for row in context.get('files', []) if row.get('path') == reference['path']]
+    if len(entries) != 1 or entries[0].get('sha256') != reference['sha256']:
+        fail('method_context_reference_not_in_original_batch', reference['path'])
+    relative = safe_relative(reference['path'], 'method_context.reference.path')
+    root = workflow_storage.ensure_cold_output(
+        repo/'数学一回滚复习系统/A分包'/batch_binding['batch_id']/batch_binding['shard_id'])
+    source = require_file(root/relative, root)
+    if source.stat().st_size != entries[0]['size'] or file_sha256(source) != reference['sha256']:
+        fail('method_context_input_bytes_changed', reference['path'])
+    return source, {'source_kind': 'fixed_batch_method_reference',
+                    'batch_id': batch_binding['batch_id'], 'shard_id': batch_binding['shard_id'],
+                    'plan_sha256': batch_binding['plan_sha256'],
+                    'method_context_selection_sha256': context['selection_sha256']}
+
+
+def validate_method_profile_coverage(profiles, batch_binding):
+    # Additive export revision: old verified A packages remain accepted under
+    # their old contract, while a new source-backed input cannot silently lose
+    # its method reference on the return trip.
+    context = (batch_binding or {}).get('method_context')
+    if not context or profiles is None:
+        return
+    contexts = [row for row in context.get('files', []) if row.get('path') == 'method-context/context.json']
+    if len(contexts) != 1:
+        fail('topic_method_context_manifest_invalid')
+    expected = contexts[0]
+    for update in profiles['updates']:
+        if not any(ref.get('path') == expected['path'] and ref.get('sha256') == expected['sha256']
+                   for ref in update.get('source_refs', []) if isinstance(ref, dict)):
+            fail('profile_method_context_reference_required', update.get('concept_key'))
+        if not any(isinstance(ref, dict) and isinstance(ref.get('path'), str) and
+                   not ref['path'].startswith('method-context/') for ref in update.get('source_refs', [])):
+            fail('profile_personal_feedback_source_required', update.get('concept_key'))
 
 
 def stage(args: argparse.Namespace) -> dict[str, Any]:
@@ -614,21 +731,46 @@ def stage(args: argparse.Namespace) -> dict[str, Any]:
     source_zip = args.zip.expanduser().resolve(strict=True)
     require_file(source_zip)
     zip_sha256 = file_sha256(source_zip)
-    stage_root = repo / "数学一回滚复习系统/A增强输入"
-    stage_root.mkdir(parents=True, exist_ok=True)
-    if stage_root.is_symlink() or not stage_root.resolve().is_relative_to(repo):
-        fail("unsafe_stage_root")
+    workspace = getattr(args, "workspace_root", None) or workflow_storage.WORK_ROOT / "接收工作区"
+    stage_root = workflow_storage.ensure_workspace(workspace / "A增强输入")
     lock_path = stage_root / ".lock"
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            return _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root)
+            result = _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    # Advisory model work must not hold the native preparation lock or modify
+    # the immutable prepared payload/receipt consumed by the formal writer.
+    try:
+        from math_evidence_prescreen import run_math_prescreen
+        receipt_path = Path(result['receipt_path'])
+        if file_sha256(require_file(receipt_path)) != result['receipt_sha256']:
+            raise ValueError('prescreen_native_receipt_changed')
+        receipt = load_json(receipt_path)
+        result['evidence_prescreen'] = run_math_prescreen(repo, receipt_path.parent, receipt)
+        sidecar = receipt_path.parent / 'evidence-prescreen'
+        if sidecar.is_dir():
+            try:
+                result['evidence_prescreen_storage_registration'] = workflow_storage.register_cold_artifact(
+                    sidecar, purpose='math_A_evidence_prescreen_advisory')
+            except Exception as exc:
+                result['evidence_prescreen_storage_registration'] = {
+                    'status': 'failed', 'error_type': type(exc).__name__,
+                    'artifact_preserved': True, 'retry_registration_only': True,
+                }
+    except Exception as exc:
+        result['evidence_prescreen'] = {
+            'status': 'unavailable', 'reason': 'math_prescreen_' + type(exc).__name__,
+            'advisory_only': True, 'not_flagged_is_not_approved': True,
+            'native_prepare_unchanged': True,
+        }
+    return result
 
 
 def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
-    with tempfile.TemporaryDirectory(prefix="math-A-enhancement-") as temporary:
+    external_stage = not stage_root.is_relative_to(repo)
+    with tempfile.TemporaryDirectory(prefix="math-A-enhancement-", dir=stage_root) as temporary:
         work = Path(temporary).resolve()
         extracted = extract_zip(source_zip, work / "zip", args.max_unpacked_bytes)
         manifest, generation = validate_manifest(extracted, args.run_id)
@@ -647,14 +789,23 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
             staged_files = receipt.get("staged_files")
             if not isinstance(staged_files, list) or not staged_files:
                 fail("existing_A_stage_receipt_incomplete", run_id)
+            stored_externally = receipt.get("artifact_storage") == "t9_workspace_v1"
+            if stored_externally != external_stage:
+                fail("existing_A_stage_storage_mismatch")
+            file_root = stage_root if stored_externally else repo
             for row in staged_files:
-                path = require_file(repo / safe_relative(row.get("path"), "receipt.staged_files.path"), repo)
+                path = require_file(file_root / safe_relative(row.get("path"), "receipt.staged_files.path"), file_root)
                 if file_sha256(path) != row.get("sha256") or path.stat().st_size != row.get("size"):
                     fail("existing_A_stage_readback_failed", row.get("path"))
+            for row in receipt.get("formal_evidence_files", []):
+                path = require_file(repo / safe_relative(row.get("path"), "receipt.formal_evidence_files.path"), repo)
+                if file_sha256(path) != row.get("sha256") or path.stat().st_size != row.get("size"):
+                    fail("existing_A_stage_evidence_readback_failed", row.get("path"))
             return response(receipt, receipt_path, "noop")
 
         advice, profiles = validate_business(extracted, manifest, generation)
         batch_binding=validate_topic_batch(repo,manifest)
+        validate_method_profile_coverage(profiles, batch_binding)
         snapshot_root = args.published_root.expanduser().resolve(strict=True) if args.published_root else None
         snapshot = PublishedSnapshot(
             bridge_root, manifest["source_commit"], args.publication_receipt,
@@ -700,6 +851,8 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
                 fail("source_reference_commit_mismatch", path)
             if path.startswith("quick-packs/"):
                 source, binding = quick.source(reference)
+            elif path.startswith("method-context/"):
+                source, binding = topic_method_source(repo, batch_binding, reference)
             else:
                 source = snapshot.source(path, digest, number)
                 binding = {
@@ -713,8 +866,15 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
 
         temporary_stage = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=stage_root))
         try:
-            stage_relative = temporary_stage.relative_to(repo)
-            final_relative = target.relative_to(repo)
+            if external_stage:
+                # This small immutable cache is formal profile provenance, not
+                # a working ZIP/extraction directory. Native profile references
+                # remain repository-relative and survive T9 work-file archival.
+                final_relative = Path("错题知识网络/个人知识点索引/source_cache/A增强证据") / run_id
+                stage_relative = final_relative
+            else:
+                stage_relative = temporary_stage.relative_to(repo)
+                final_relative = target.relative_to(repo)
             copy_new(source_zip, temporary_stage / "input.zip")
             copy_new(extracted / "manifest.json", temporary_stage / "manifest.json")
             copy_new(extracted / "advice.json", temporary_stage / "advice.json")
@@ -747,6 +907,7 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
 
             prepared = None
             gaps = []
+            inherited_evidence = set()
             if profiles is None:
                 gaps.append({"kind": "legacy_v4_missing_profile_updates", "file": "profile_updates.json"})
             else:
@@ -776,18 +937,15 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
                 if prepared is not None:
                     if batch_binding:
                         prepared['_deferred_batch_merge']=batch_binding
-                    for update in prepared["updates"]:
-                        for ref in update["source_refs"]:
-                            temporary_prefix = str(stage_relative) + "/"
-                            if not ref["path"].startswith(temporary_prefix):
-                                fail("prepared_profile_reference_not_staged", ref["path"])
-                            ref["path"] = str(final_relative) + "/" + ref["path"][len(temporary_prefix):]
+                    inherited_evidence = finalize_prepared_refs(
+                        repo, prepared, stage_relative, final_relative)
                     write_new(temporary_stage / "prepared_profiles.json", canonical(prepared))
 
             files = []
             for path in sorted(temporary_stage.rglob("*")):
                 if path.is_file():
-                    final_path = final_relative / path.relative_to(temporary_stage)
+                    final_path = ((target.relative_to(stage_root) if external_stage else final_relative)
+                                  / path.relative_to(temporary_stage))
                     files.append({"path": str(final_path), "sha256": file_sha256(path), "size": path.stat().st_size})
             status = (
                 "prepared" if prepared is not None
@@ -808,6 +966,12 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
                 "gaps": gaps, "staged_files": files,
                 "formal_write_count": 0, "learning_event_count": 0,
             }
+            if external_stage:
+                receipt["artifact_storage"] = "t9_workspace_v1"
+                receipt["formal_evidence_files"] = [
+                    {"path": path, "sha256": file_sha256(repo / path), "size": (repo / path).stat().st_size}
+                    for path in sorted(set(mapping.values()) | inherited_evidence)
+                ]
             write_new(temporary_stage / "receipt.json", canonical(receipt))
             os.replace(temporary_stage, target)
             directory = os.open(stage_root, os.O_RDONLY)
@@ -824,6 +988,8 @@ def _stage_locked(args, repo, bridge_root, source_zip, zip_sha256, stage_root):
 
 def response(receipt: dict[str, Any], receipt_path: Path, stage_status: str) -> dict[str, Any]:
     root = receipt_path.parent
+    storage_registration = workflow_storage.register_cold_artifact(
+        root, purpose="math_A_enhancement_input")
     prepared = root / "prepared_profiles.json"
     advice = root / "advice.json"
     return {
@@ -831,6 +997,7 @@ def response(receipt: dict[str, Any], receipt_path: Path, stage_status: str) -> 
         "run_id": receipt["run_id"], "source_commit": receipt["source_commit"],
         "contract_generation": receipt["contract_generation"],
         "stage_path": str(root), "receipt_path": str(receipt_path),
+        "storage_registration": storage_registration,
         "receipt_sha256": file_sha256(receipt_path),
         "advice_path": str(advice),
         "advice_items": [
@@ -851,7 +1018,10 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--zip", type=Path, required=True, help="Actual downloaded Project A math ZIP")
     value.add_argument("--run-id", help="Optional exact run ID assertion")
     value.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
-    value.add_argument("--bridge-root", type=Path, default=Path("/Users/your-user/Documents/Study-Pro-Bridge"))
+    value.add_argument("--bridge-root", type=Path, default=math_runtime_paths.bridge_root())
+    value.add_argument("--workspace-root", type=Path,
+                       default=Path("/Volumes/Study-Archive/03_数学/资料库/网页加工中间文件/接收工作区"),
+                       help="T9 directory for ZIPs, extraction, prepared results and process receipts")
     value.add_argument("--published-root", type=Path, help="Optional already materialized fixed-snapshot root")
     value.add_argument("--publication-receipt", type=Path, help="Optional exact verified publication receipt")
     value.add_argument("--max-unpacked-bytes", type=int, default=DEFAULT_MAX_BYTES)

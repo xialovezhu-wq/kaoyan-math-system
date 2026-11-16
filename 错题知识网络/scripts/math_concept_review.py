@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -267,10 +267,16 @@ def commit_session(repo_root, payload, *, refresh_only=False, postcommit=True):
         directory.mkdir(parents=True, exist_ok=True)
         if target.exists():
             previous = load_session(root, target / "session.json")
-            if previous["content_sha256"] != value["content_sha256"]:
+            before = {k:v for k,v in previous.items() if k not in {'content_sha256','recorded_at'}}
+            after = {k:v for k,v in value.items() if k not in {'content_sha256','recorded_at'}}
+            if before != after:
                 raise ValueError("concept_review_session_conflict")
+            value = previous
             status = "noop"
         else:
+            core = {k:v for k,v in value.items() if k != 'content_sha256'}
+            core['recorded_at'] = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+            value = {**core, 'content_sha256': digest(core)}
             # Stage outside the watched authoritative directory. Rename is the
             # single commit point; abandoned staging directories are not events.
             staging = Path(tempfile.mkdtemp(prefix=".session-", dir=base))
@@ -332,6 +338,7 @@ def collect_records(root, read):
                    "retrieval_priority": {"explicit_personal_or_actual_delivery": True,
                                           "latest_explicit_learning_date": payload["study_date"]},
                    "summary": {"session_id": payload["session_id"], "event_id": session["event_id"],
+                               "recorded_at": session.get('recorded_at'),
                                "study_date": payload["study_date"], "wrong_session_count": int(any(row["outcome"] == "wrong" for row in observations)),
                                "observation_count": len(observations), "observations": observations,
                                "related_formal_ids": sorted({fid for row in observations for fid in row["related_formal_ids"]}),
@@ -340,8 +347,8 @@ def collect_records(root, read):
                                "started_at": payload["started_at"], "ended_at": payload["ended_at"]}}
 
 
-def refresh_pages(repo_root):
-    """Rebuild readable concept pages from one verified native snapshot."""
+def refresh_pages(repo_root, concept_keys=None):
+    """Refresh only changed point pages; the small navigation index stays complete."""
     import math_concept_index as native
     import study_personalization_math as snapshot
     root = Path(repo_root).resolve()
@@ -350,34 +357,59 @@ def refresh_pages(repo_root):
         raise ValueError("concept_review_pages_require_current_index")
     with closing(sqlite3.connect((root / native.INDEX).as_uri() + "?mode=ro", uri=True)) as conn:
         conn.execute("BEGIN")
-        concepts = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM concepts ORDER BY label,key")]
-        records = {rid: json.loads(payload) for rid, payload in conn.execute("SELECT id,payload FROM records")}
-        membership = list(conn.execute("SELECT key,record_id FROM membership ORDER BY key,record_id"))
+        concepts = []
+        for key,label,ids,wiki_paths,markers in conn.execute(
+                "SELECT key,label,json_extract(payload,'$.formal_ids'),json_extract(payload,'$.wiki_paths'),"
+                "json_extract(payload,'$.review_markers') FROM concepts ORDER BY label,key"):
+            concepts.append({'key':key,'label':label,'formal_ids':json.loads(ids or '[]'),
+                             'wiki_paths':json.loads(wiki_paths or '[]'),'review_markers':json.loads(markers or '{}')})
+        selected = {c['key'] for c in concepts} if concept_keys is None else set(concept_keys)
+        unknown = selected-{c['key'] for c in concepts}
+        if unknown:
+            raise ValueError('unknown_concept_page_scope:'+','.join(sorted(unknown)))
+        records, members = {}, {}
+        for key in selected:
+            for rid,payload in conn.execute('SELECT r.id,r.payload FROM records r JOIN membership m ON r.id=m.record_id WHERE m.key=?', (key,)):
+                records[rid]=json.loads(payload)
+                members.setdefault(key,[]).append(rid)
+        # A concept observation can link a formal ID without making the card
+        # itself a member of that concept. Resolve those links in the snapshot.
+        card_paths = {}
+        for fid, source_refs in conn.execute(
+            "SELECT id,json_extract(payload,'$.source_refs') FROM records "
+            "WHERE json_extract(payload,'$.kind')='personal_card'"
+        ):
+            card_paths[fid] = next(
+                (ref["path"] for ref in json.loads(source_refs or "[]")
+                 if ref["path"].startswith("错题知识网络/错题卡/")), None
+            )
     output = safe_path(root, root / PAGES)
     output.mkdir(parents=True, exist_ok=True)
     lines = ["# 数学知识点复盘", "", "知识点是唯一锚点。关联题仅提供来源，不表示本次复做过这些题。", "",
              "新复盘标记来自正式完整会话；旧题历史不回填为新复发。", "", f"快照版本：`{identity['version']}`", ""]
-    count = 0
-    wiki_paths = {}
-    for path in (root / "错题知识网络/wiki").rglob("*.md"):
-        wiki_paths.setdefault(path.stem.partition("_")[0], []).append(path)
+    count = sum(c['review_markers'].get('session_count',0) for c in concepts)
+    rendered = 0
     for concept in concepts:
         key = concept["key"]
-        reviews = [records[rid] for member, rid in membership if member == key and records[rid].get("kind") == "concept_review"]
+        markers=concept['review_markers']
+        lines.append(f"- [{concept['label']}]({key}.md) · 关联题 {len(concept['formal_ids'])} · 复盘 {markers.get('session_count',0)} · 错误会话 {markers.get('wrong_session_count',0)}")
+        if key not in selected:
+            continue
+        import math_memory_projection
+        reviews = math_memory_projection.effective_point_records(root,
+            [records[rid] for rid in members.get(key,[]) if records[rid].get('kind') == 'concept_review'], key)
         reviews.sort(key=lambda row: (row["summary"]["study_date"], row["record_id"]))
         wrong_sessions = sum(row["summary"]["wrong_session_count"] for row in reviews)
-        count += len(reviews)
+        rendered += 1
         body = [f"# {concept['label']}", "", f"知识点键：`{key}`", "", "## 关联正式题", "",
                 "这里只表示知识点关联，不推断关联题本轮作答、错因或掌握度。", ""]
         for fid in concept["formal_ids"]:
-            refs = records[fid]["source_refs"]
-            card_path = next((ref["path"] for ref in refs if ref["path"].startswith("错题知识网络/错题卡/")), None)
+            card_path = card_paths.get(fid)
             relative = os.path.relpath(root / card_path, output) if card_path else None
             body.append(f"- [{fid}]({relative})" if relative else f"- {fid}")
-        for wiki_id in concept.get("wiki_ids", []):
-            paths = wiki_paths.get(wiki_id, [])
-            for path in paths:
-                body.append(f"- [既有知识点页 {wiki_id}]({os.path.relpath(path, output)})")
+        for relative_path in concept.get('wiki_paths', []):
+            path=root/relative_path
+            body.append(f"- [既有知识点页 {path.stem}]({os.path.relpath(path, output)})")
         if not concept["formal_ids"]:
             body.append("暂无关联正式题。")
         body += ["", "## 正式复盘标记", "", f"会话数：{len(reviews)}；出现明确错误的会话数：{wrong_sessions}。同会话同知识点最多计一次，全部观测保留。", ""]
@@ -392,10 +424,9 @@ def refresh_pages(repo_root):
         if not reviews:
             body.append("暂无正式知识点复盘事件。")
         snapshot._write(output / (key + ".md"), ("\n".join(body) + "\n").encode())
-        lines.append(f"- [{concept['label']}]({key}.md) · 关联题 {len(concept['formal_ids'])} · 复盘 {len(reviews)} · 错误会话 {wrong_sessions}")
     snapshot._write(output / "index.md", ("\n".join(lines) + "\n").encode())
     return {"status": "refreshed", "index_path": str(PAGES / "index.md"), "concept_count": len(concepts),
-            "concept_session_count": count, "version": identity["version"]}
+            "concept_session_count": count, "version": identity["version"], "rendered_concept_count":rendered}
 
 
 def main():

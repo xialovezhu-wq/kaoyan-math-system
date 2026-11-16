@@ -1,5 +1,15 @@
 # 数学 Skill 对齐
 
+## 后续本机加载
+
+已同步实际用户安装的 kaoyan-math-question-worker。全新 Mac app-server 强制扫描，在实际数学工作目录唯一发现并启用该副本，源文件及安装包完整匹配。快速校验退出 0。
+
+本机实际整包 SHA-256 为 55b662cc8a09573d2cb500418ced1eb77e455bfc5082b95aec0e8d3b846ff4c1。本次改变的 references/teaching-turn.md 的 SHA-256 为 dd3e2b5cb0774ac4b7ca1ff8b7591337fd11f36c7201ff232989d5f6332d2747。
+
+以下为首次交付时的安装和隔离加载结果。
+
+---
+
 本机 Codex Desktop 0.169.0-alpha.11.1 / macOS arm64；在真实数学 cwd 启动全新 app-server，运行 skills/list(forceReload=true)，核对返回的路径、scope、enabled 和磁盘字节。九项均从实际用户安装位置唯一发现、启用，无数学加载错误，且源和完整安装包一致。随后在隔离 cwd 验证候选仓库范围的讲题 Skill 可被同一 loader 发现。实答回放调用的是实际数学读取器和真实 API，不能替代桌面工具调用或旧会话热重载。
 
 源位置：数学工作区 codex-skill-sources/<名称>/SKILL.md。安装位置：~/.codex/skills/<名称>/SKILL.md。包哈希为排序后的逐文件 SHA-256 清单的 SHA-256，覆盖入口、引用、agents、脚本与资产；排除 .DS_Store 与 Python 缓存。下表为实际路径读回哈希；远程公开源码去掉机器专有路径，不能用发布版哈希替代本机安装哈希。

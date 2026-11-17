@@ -1206,6 +1206,17 @@ def resolve_teaching_concepts(repo_root: Path | str, concepts: list[str],
             known_version=native_known, max_bytes=max_bytes)
     if teaching_turn:
         from math_tutoring_inputs import teaching_inputs
+        identity = result.get('identity') or {}
+        if view == 'direct' and identity.get('kind') == 'formal_card' and not (
+                valid_at or known_at or point_records or result.get('status') in
+                ('identity_conflict', 'ambiguous_identity', 'stale', 'budget_too_small', 'unknown_formal_id')):
+            import math_formula_cards
+            diagram = math_formula_cards.lookup_diagram(repo_root, identity.get('formal_id'), operation, view)
+            if diagram:
+                enriched = {**result, 'checked_geometry_ref': diagram}
+                enriched['version'] = sha256_value([result.get('version'), diagram])
+                if len(canonical_json(enriched).encode()) <= max_bytes:
+                    result = enriched
         result = teaching_inputs(result, max_bytes, repo=repo_root, operation=operation,
                                  known_version=known_version, add_exact=not (valid_at or known_at or point_records))
     return result

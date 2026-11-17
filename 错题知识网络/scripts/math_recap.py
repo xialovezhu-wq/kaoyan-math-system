@@ -680,7 +680,7 @@ def query(root=ROOT, *, concepts=(), formal_id=None, source_id=None, operation=N
         return _empty('source_changed', view=view, reason=str(exc))
 
 
-def teaching_recap(value):
+def teaching_recap(value, root=ROOT):
     """Project teaching content, keeping complete mathematics and usage limits.
 
     Historical review transcripts stay in the authored source and standalone
@@ -699,6 +699,11 @@ def teaching_recap(value):
                                    if k in ('status','reviewed_at','source_relation')}
             entry['detail_lookup'] = ('math_recap.py query --concept ' + entry['entry_id'] +
                                       ' --view ' + value.get('view', 'protected'))
+    view = value.get('view', 'protected')
+    if view != 'protected' and value['status'] == 'available':
+        import math_formula_cards as cards
+        candidates = [entry for key in cards.SECTIONS for entry in value.get(key, [])]
+        cards.annotation(root, candidates, view)
     value['projection'] = 'teaching_reference'
     return value
 
@@ -706,7 +711,7 @@ def teaching_recap(value):
 def attach(result, root=ROOT, *, concepts=(), formal_id=None, source_id=None,
            operation=None, view='protected', known_version=None, max_bytes=12000):
     recap = teaching_recap(query(root, concepts=concepts, formal_id=formal_id, source_id=source_id,
-                                operation=operation, view=view, context=result))
+                                operation=operation, view=view, context=result), root=root)
     value = copy.deepcopy(result)
     value['recap'] = recap
     if recap['status'] == 'available' and result.get('status') in ('unknown_concept', 'no_match', 'unknown_source_id'):
@@ -745,7 +750,15 @@ def attach(result, root=ROOT, *, concepts=(), formal_id=None, source_id=None,
                 return candidate
         return combine(compact, reference)
 
-    value = fit({key: item for key, item in value.items() if key != 'recap'}, recap)
+    native = {key: item for key, item in value.items() if key != 'recap'}
+    value = fit(native, recap)
+    if len(canonical(value)) > max_bytes:
+        # A derived link is optional; keep the actual conditions and formulas.
+        without_links = copy.deepcopy(recap)
+        for key in SECTIONS[:2]:
+            for entry in without_links[key]:
+                entry.pop('formula_card', None)
+        value = fit(native, without_links)
     required = len(canonical(value))
     if result.get('status') == 'budget_too_small':
         required = max(required, result.get('required_min_bytes', 0) +
@@ -797,7 +810,7 @@ def main():
                   concepts=args.concept, formal_id=args.formal_id, source_id=args.source_question_id,
                   operation=args.operation, view=args.view))
         if args.command == 'query' and args.teaching:
-            result = teaching_recap(result)
+            result = teaching_recap(result, root=args.repo)
     except (OSError, ValueError) as exc:
         result = {'status': 'error', 'reason': str(exc), 'learning_write_count': 0}
     print(json.dumps(result, ensure_ascii=False, indent=2))

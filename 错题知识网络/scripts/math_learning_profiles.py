@@ -2073,6 +2073,28 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
                     'required_min_bytes':required,
                     'required_fields':['exam_frequency','choice_fill_guidance','personal_summary'],
                     'retry_scope':'same_identity_concepts_and_view_with_required_budget'}
+        if view != 'protected' and explicit_concepts and not (recovery or ambiguous or unknown):
+            # Small prepared IDs only, after both the original scope gate and
+            # the byte-budget negotiation. Keep the personal facts first.
+            import math_formula_cards as formula_cards
+            try:
+                current = formula_cards.pointer(root)
+            except (OSError, ValueError):
+                current = None
+            if current and (current.get('native_bindings') or {}).get('bound_profile_version') == meta['version']:
+                delivered = []
+                for item in base['records']:
+                    refs = formula_cards.profile_refs(root, conn, item['concept_key'], view, current=current)
+                    if not refs:
+                        continue
+                    item['formula_card_refs'] = refs
+                    if len(canonical(base).encode()) > max_bytes:
+                        item.pop('formula_card_refs')
+                    else:
+                        delivered.append((item['concept_key'], refs))
+                if delivered:
+                    query_version = digest([query_version, current['version'], delivered])
+                    base['version'] = query_version
         if (known_version == query_version and all(row['status'] == 'available' for row in method_states)
                 and not any(row.get('exam_context', {}).get('status') == 'stale' for row in rows)):
             from math_teaching_delivery import has_delivery_gap

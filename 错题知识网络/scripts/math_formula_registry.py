@@ -100,6 +100,7 @@ def teaching_reference(record):
 class FormulaRegistry:
     def __init__(self, root=ROOT, *, read_bytes: Callable[[str], bytes] | None = None):
         self.root = Path(root)
+        self._local_projection = read_bytes is None
         self._reader = read_bytes or self._local_read
         try:
             raw = self._reader(MANIFEST)
@@ -213,6 +214,13 @@ class FormulaRegistry:
         records = [self.get(x, view=view) for x in selected[offset:stop]]
         if compact:
             records = [teaching_reference(record) for record in records]
+            if self._local_projection and view == 'direct' and question_id is None:
+                # Practice plans and question-bound variants keep their
+                # original exact source/eligibility checks.
+                from math_formula_cards import lookup
+                for record in records:
+                    if formula_reference_ready(record):
+                        record['formula_card'] = lookup(self.root, record['entry_id'], view=view)
         return {**self.summary(), 'view': view, 'question_id': question_id,
                 'records': records,
                 'total_records': len(selected), 'next_offset': stop if stop < len(selected) else None,

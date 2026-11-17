@@ -1,32 +1,8 @@
-# Math Review Output Structure
+# 每题一张记忆卡
 
-Use the smallest structure that preserves the requested artifact and the evidence needed to act on it.
+1. 用短标题点明题目的知识点。多问保留同题关系，线索、边界或方法不同就用树分支。
+2. 标题下给原题。优先用已核、没有解析标记的原题图；题图缺失时按原件用题面图表或已知／所求结构保留条件、选项和小问。不要从旧解答逆写题目。
+3. 题面下方依次给二级结论、基本方法与解题过程、基本公式。二级结论每条写「可复用结论＋条件」。方法用左栏树节点写一个可复用动作，右栏对应框给该题这一动作的实算，箭头逐步连接。分支对应真实小问、条件或已给出的另一条解法。基本公式列数学表达式，符号角色和条件尽量用一行写清。
+4. 公式优先：已核卡的条件、原式和必要边界同屏；推导、来源和原始卷面可展开。按已授权精确身份复用经检查的几何图，缺数据保留公式与限制。原始叙事与提示顺序仍留原始证据。只有明确要求才另写 10–15 分钟口播，不把口播作为阅读卡必填项。
 
-## Required Sections
-
-1. 本次范围：日期、主题、证据来源、缺失信息。
-2. 今日结论：一句话说明今天主要解决的问题和最危险断点。
-3. 错误模式：每项带题号或稳定证据，不只列泛标签。
-4. 方法断点：题面触发、应做第一动作、漏掉动作和下一次提醒。
-5. 重点题：零到五道，每题包含 ID、来源定位、错因、第一动作和明日优先级。
-6. 10–15 分钟口播：开场、主线、重点题、方法总结、明日动作。
-7. 明日路线：按执行顺序给出可观察动作。
-8. 边界报告：是否保存、是否同步 Tutor、哪些正式数据未修改。
-
-## Timing Guide
-
-- 开场：约 30 秒。
-- 今日主线：2–3 分钟。
-- 重点题：6–8 分钟，题少时缩短而不是填充。
-- 方法总结：2–3 分钟。
-- 明日动作：约 1 分钟。
-
-## Evidence Language
-
-Separate verified facts, model synthesis, and missing evidence. Use `待确认`, `未记录`, `待补充`, or `待评分` exactly where information is unavailable. Chronicle-derived locators are not verified facts until a stable file or user statement confirms them.
-
-Keep each question card short enough to speak. Full problem statements, long derivations, screenshots, and answer keys remain in their protected source layer.
-
-## Voice
-
-Lead with the conclusion. Use concrete first-action language such as “先判型、先检查定义域、先固定变量角色、先写边界条件”. Include the evidence needed to justify the conclusion and omit repeated background, generic encouragement, and decorative prose.
+聊天公式用原生数学，长式独立放在正文。文本树和 Mermaid 节点只写短动作，按同一顺序在正文给题中过程。需要复盘多个知识点时保持实际覆盖，别按固定卡数截断。HTML 的题面、三个区域和树形布局见 [HTML 模板](html-review-template.md)。

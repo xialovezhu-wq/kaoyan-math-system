@@ -14,6 +14,8 @@
 
 本题讲解及快速回顾优先复用 `math_teaching_context.py resolve --include-recap` 的 `recap.basic_formulas`、`recap.secondary_conclusions`、`recap.solution_methods`。条目包含完整content、conditions、symbol_roles、source_refs、relation及reference_ready；读取正文后仍须核当前题条件。精确题目／小问映射优先，无精确映射时才用当前细点候选；相近词或关联题不证明适用。`recap.status=available` 仅表示至少有一组已核候选，须逐项检查 `query_coverage.matched_concepts` 与 `unmatched_concepts`。题号未绑定个人记录不影响独立读取已核公式；`no_match` 只说明此次标签或别名未命中，不等于库中不存在。可用已核同义名或条目ID作一次同范围修正。`unavailable`、`source_changed` 与保护限制保持各自含义，不用邻近主题顶替。
 
+`formula_card.status=ready` 是该条当前来源的展示引用，`formula_card_refs` 是小型候选定位，均不扩大使用范围。独立公式请求可按精确已核 ID 用 `math_formula_cards.py query --id ID --view 当前视图` 读取卡片，依 `statement_sequence` 保留分支前提和原式顺序。`projection_pending` 只回同轮已核、已授权的原条目；不链接旧 HTML 或改读高权限视图。`checked_geometry_ref` 只用于已授权的同题同动作直接讲解；图的结论按回执区分推导和单构型核验。
+
 教学阶段同次预取并在本题上下文中保留完整返回；同题同点同view、同include-recap形态且无更新信号时复用。首次追加include-recap或未持有完整返回时不传known-version；只有持有同形态完整结果才复用其组合版本。快存后缺项允许同题同视图一次本机有界补读；预算不足只按required_min_bytes补足同一对象一次。实时不启动OCR、全库维护、外部模型或整章查找。
 
 本地入口为 `错题知识网络/scripts/math_formula_registry.py`。`status`返回版本与覆盖；`query --id 真实FCE-ID --view direct --compact`读取教学所需内容；精确数学一原题可用 `query --question-id MATH1-... --view direct`取得已核候选。`--compact`保留公式、条件、变体、等价式、简要推导、本地审核和引用身份，省略重复内容及大段来源审计；需要核对某个来源时，才对同一精确ID移除`--compact`。

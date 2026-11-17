@@ -350,11 +350,17 @@ def collect_records(root, read):
 def refresh_pages(repo_root, concept_keys=None):
     """Refresh only changed point pages; the small navigation index stays complete."""
     import math_concept_index as native
+    import math_formula_cards as formulas
     import study_personalization_math as snapshot
     root = Path(repo_root).resolve()
     identity = snapshot.current_identity(root)
     if identity["status"] != "ready":
         raise ValueError("concept_review_pages_require_current_index")
+    try:
+        formula_pointer = formulas.pointer(root)
+    except (ValueError, OSError):
+        formula_pointer = None
+    formula_by_concept = {}
     with closing(sqlite3.connect((root / native.INDEX).as_uri() + "?mode=ro", uri=True)) as conn:
         conn.execute("BEGIN")
         concepts = []
@@ -372,6 +378,9 @@ def refresh_pages(repo_root, concept_keys=None):
             for rid,payload in conn.execute('SELECT r.id,r.payload FROM records r JOIN membership m ON r.id=m.record_id WHERE m.key=?', (key,)):
                 records[rid]=json.loads(payload)
                 members.setdefault(key,[]).append(rid)
+            if (formula_pointer and (formula_pointer.get("native_bindings") or {}).get("bound_profile_version")
+                    == identity["version"]):
+                formula_by_concept[key] = formulas.profile_refs(root, conn, key, "direct", current=formula_pointer)
         # A concept observation can link a formal ID without making the card
         # itself a member of that concept. Resolve those links in the snapshot.
         card_paths = {}
@@ -401,7 +410,13 @@ def refresh_pages(repo_root, concept_keys=None):
         reviews.sort(key=lambda row: (row["summary"]["study_date"], row["record_id"]))
         wrong_sessions = sum(row["summary"]["wrong_session_count"] for row in reviews)
         rendered += 1
-        body = [f"# {concept['label']}", "", f"知识点键：`{key}`", "", "## 关联正式题", "",
+        body = [f"# {concept['label']}", "", f"知识点键：`{key}`", ""]
+        if formula_by_concept.get(key):
+            formula_entry = os.path.relpath(root / formulas.STORE / "index.md", output)
+            body += ["## 基础公式与二级结论", "",
+                     f"[查看当前公式卡]({formula_entry}) · " + "、".join(
+                         row["id"] for row in formula_by_concept[key]), ""]
+        body += ["## 关联正式题", "",
                 "这里只表示知识点关联，不推断关联题本轮作答、错因或掌握度。", ""]
         for fid in concept["formal_ids"]:
             card_path = card_paths.get(fid)

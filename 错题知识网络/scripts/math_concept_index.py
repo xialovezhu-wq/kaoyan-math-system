@@ -161,8 +161,13 @@ def _db(path: Path) -> sqlite3.Connection:
       CREATE INDEX IF NOT EXISTS records_formal_id ON records(formal_id);
       CREATE TABLE IF NOT EXISTS membership (key TEXT, record_id TEXT, PRIMARY KEY(key,record_id));
       CREATE INDEX IF NOT EXISTS membership_key ON membership(key);
+      CREATE INDEX IF NOT EXISTS membership_record_key ON membership(record_id,key);
       CREATE TABLE IF NOT EXISTS source_identities (source_id TEXT, formal_id TEXT, card_path TEXT, PRIMARY KEY(source_id,formal_id));
       CREATE TABLE IF NOT EXISTS teaching_profiles (key TEXT, view TEXT, payload TEXT, PRIMARY KEY(key,view));
+      CREATE TABLE IF NOT EXISTS formula_projection_refs (
+        generation TEXT, key TEXT, view TEXT, card_id TEXT, ordinal INTEGER,
+        PRIMARY KEY(generation,key,view,ordinal)
+      );
     """)
     import math_memory_projection
     math_memory_projection.ensure_tables(connection)

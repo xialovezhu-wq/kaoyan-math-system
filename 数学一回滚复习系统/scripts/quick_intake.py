@@ -6094,6 +6094,15 @@ def cmd_close(args: argparse.Namespace) -> None:
                 event_id = event["event_id"]
                 status = "noop"
             else:
+                import math_formal_quality
+                from types import SimpleNamespace
+                try:
+                    math_formal_quality.require_close(
+                        sys.modules.get(__name__) or SimpleNamespace(**globals()), raw,
+                        legacy_receipt=getattr(args, "legacy_return_receipt", None),
+                    )
+                except ValueError as exc:
+                    raise QuickIntakeError(str(exc)) from exc
                 payload = normalize_closeout(raw, state)
                 payload_hash = sha256_value(payload)
                 freeze_id = payload["freeze_id"]
@@ -6337,6 +6346,16 @@ def cmd_web_advice_decision(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
+def cmd_apply_formal_targets(args: argparse.Namespace) -> None:
+    import math_formal_quality
+    try:
+        result = math_formal_quality.apply_cards(sys.modules[__name__], args.proof)
+    except (ValueError, KeyError) as exc:
+        raise QuickIntakeError(str(exc)) from exc
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="数学学习中的快速错题证据事件与夜间收口回执"
@@ -6433,11 +6452,19 @@ def build_parser() -> argparse.ArgumentParser:
     abort_parser.add_argument("--reason", required=True, help="用户确认的放弃原因")
     abort_parser.set_defaults(func=cmd_abort_freeze)
 
+    apply_parser = subparsers.add_parser(
+        "apply-formal-targets", help="凭同批质量 proof 串行写入冻结的正式卡",
+    )
+    apply_parser.add_argument("--proof", type=Path, required=True)
+    apply_parser.set_defaults(func=cmd_apply_formal_targets)
+
     close_parser = subparsers.add_parser(
         "close",
         help="所有正式层通过后追加一次夜间 closeout 回执",
     )
     close_parser.add_argument("--receipt-file", required=True, help="夜间回执 JSON；- 表示从标准输入读取一行")
+    close_parser.add_argument("--legacy-return-receipt", type=Path, action="append",
+                              help="历史网页回包原生准备回执，可按实际分片重复")
     close_parser.add_argument(
         "--consume-receipt-file",
         action="store_true",

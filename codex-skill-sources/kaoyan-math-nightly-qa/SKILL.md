@@ -94,6 +94,8 @@ Do not revive Terra, Provider, MCP resolver/consumer, AnalysisPackage, Dispatche
 
 ## Parent Formal Decisions
 
+当前冻结批次先读已有 `math_formal_quality.py begin` 返回的精确、标签与同版向量候选、Decisions 及同 Capture 的顺序证据，再决定采纳、按条件分开或保留不确定。候选同形或向量接近不能判同一结论；来源、对象、定义域、量词和推出方向必须对齐。模型回执是冷路径建议，父任务复核、原 writer 串行提交；API 未核验或失败不算完成模型裁决。
+
 The parent independently decides:
 
 - source and target identity, duplicate merge and formal ID allocation;
@@ -103,6 +105,8 @@ The parent independently decides:
 - final formal-card content and required derived-layer actions.
 
 Do not convert assistant explanation into independent mastery or turn missing evidence into a user error. Multiple captures for one real question produce one formal-card write while preserving each event.
+
+正式条目的可迁移公式保留必要条件。提交后检查 `postcommit.formula_projection`：沿已核来源增量生成公式/图形派生，条件、源哈希、阶段与授权一致时可复用。默认参考入口读当前代际；缺条件或坐标记待核。派生暂缺只运行 `math_postcommit.py --formula-only --event-id CLOSEOUT` 补回，不重做 freeze、apply 或学习事件。
 
 
 ## 以教材方法和真实反馈更新每个受影响知识点

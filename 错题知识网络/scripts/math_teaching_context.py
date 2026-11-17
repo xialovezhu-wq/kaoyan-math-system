@@ -37,6 +37,7 @@ VERIFY_SCHEMA = "math-teaching-context-verify-result-v1"
 VIEW_SCHEMA = "math-teaching-context-view-v1"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TEACHING_BYTE_BUDGET = 4500
 PROJECTION_REL = PurePosixPath("错题知识网络/教学投影")
 FORMAL_ID_RE = re.compile(r"^(?:GS|LA|PR)-\d+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1150,7 +1151,7 @@ def teaching_record_projection(record: dict, raw_record: dict, view: str) -> dic
 
 
 def resolve_teaching_concepts(repo_root: Path | str, concepts: list[str],
-                             view: str = "protected", max_bytes: int = 10000,
+                             view: str = "protected", max_bytes: int | None = None,
                              offset: int = 0, material_limit: int = 1, *,
                              known_version: str | None = None, formal_id: str | None = None,
                              source_id: str | None = None,
@@ -1173,6 +1174,8 @@ def resolve_teaching_concepts(repo_root: Path | str, concepts: list[str],
     # are explicit; maintenance belongs to capture/postcommit, never tutoring.
     if offset:
         return {'status': 'full_history_requires_explicit_read', 'records': []}
+    if max_bytes is None:
+        max_bytes = TEACHING_BYTE_BUDGET if teaching_turn else 10000
     import math_memory_context
     native_known = None if teaching_turn else known_version
     result = math_memory_context.resolve(repo_root, concepts, view, max_bytes,
@@ -1184,7 +1187,10 @@ def resolve_teaching_concepts(repo_root: Path | str, concepts: list[str],
         pending_spans=pending_spans, pending_whole_capture=pending_whole_capture,
         backend_config=backend_config,structured_math=structured_math,confirmed_concept=confirmed_concept,
         selection_receipt=selection_receipt,selection_basis=selection_basis,
-        selection_abstain=selection_abstain,point_records=point_records)
+        selection_abstain=selection_abstain,point_records=point_records,teaching_scope=teaching_turn)
+    if teaching_turn and (result.get('status') == 'question_point_mismatch'
+                          or result.get('schema') == 'math-scope-discovery-v1'):
+        return result
     if not teaching_turn:
         try:
             bridge = str(math_runtime_paths.bridge_root(Path(repo_root)))
@@ -1277,10 +1283,12 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument('--full-evidence', action='store_true', help='Explicit maintenance/history read, outside normal teaching')
     resolve.add_argument("--concept", action="append", dest="concepts",
                          help="Knowledge label, alias or stable key extracted from the current problem; repeat for multiple concepts")
+    resolve.add_argument('--claim-id', nargs='?', const='',
+                         help='Read one visible claim for one stable --concept in teaching mode. With no ID, list visible claim IDs.')
     resolve.add_argument("--fallback-concept", action="append", dest="fallback_concepts",
                          help="Known related label or parent scope to read if the primary concept is unmatched")
-    resolve.add_argument("--max-bytes", type=int, default=12000,
-                         help="Combined UTF-8 budget for prepared teaching summaries (default 12000)")
+    resolve.add_argument("--max-bytes", type=int,
+                         help="Combined UTF-8 budget (4500 for teaching, otherwise 12000 by default)")
     resolve.add_argument("--offset", type=int, default=0)
     resolve.add_argument("--material-limit", type=int, default=1,
                          help="Maximum reference-only items per concept page; default 1 leaves room for personal history")
@@ -1301,6 +1309,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "resolve" and args.max_bytes is None:
+        args.max_bytes = TEACHING_BYTE_BUDGET if args.for_teaching else 12000
     audit = args.command == "resolve" and args.audit_context
     if audit:
         if args.full_evidence:
@@ -1320,7 +1330,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             pending_selected = bool(args.pending_sequences or args.pending_hint_sequences or args.pending_spans or args.pending_whole_capture)
             if args.full_evidence and (args.query or args.operation or args.structured_math or args.include_pending or args.include_recap or args.pending_capture_id or pending_selected or args.valid_at or args.known_at or args.for_teaching):
                 raise TeachingContextError("full_evidence_scope_options_unsupported", "use the bounded memory reader")
-            if not args.full_evidence and (args.concepts or args.formal_id or args.source_question_id or args.query or args.pending_capture_id):
+            if args.claim_id is not None:
+                if (not args.for_teaching or len(args.concepts or []) != 1 or args.full_evidence or args.query
+                        or args.valid_at or args.known_at or args.point_records or args.include_recap
+                        or args.include_pending or args.pending_capture_id or pending_selected or args.structured_math):
+                    raise TeachingContextError('claim_readback_requires_one_exact_current_teaching_point', 'resolve')
+                from math_memory_context import resolve_claim
+                result = resolve_claim(args.repo, args.concepts[0], args.claim_id, args.view, args.max_bytes,
+                                       formal_id=args.formal_id, source_id=args.source_question_id)
+            elif not args.full_evidence and (args.concepts or args.formal_id or args.source_question_id or args.query or args.pending_capture_id):
                 import math_learning_profiles
                 result = resolve_teaching_concepts(args.repo,args.concepts or [],args.view,args.max_bytes,
                     known_version=args.known_version,formal_id=args.formal_id,source_id=args.source_question_id,

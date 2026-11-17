@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Describe the complete saved math library for the shared publisher.
 
-This entry only reads sources. It never commits, pushes, updates a learning
-event or repairs an archive. Historical incompleteness remains explicit.
+This entry refreshes existing deterministic learning-state projections before
+binding source bytes. It never commits, pushes, updates learning facts, scores
+or schedules, or repairs an archive. Historical incompleteness remains explicit.
 """
 from __future__ import annotations
 
@@ -13,12 +14,16 @@ import re
 import sqlite3
 import stat
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "错题知识网络/scripts"))
 import study_personalization_math
+import math_runtime_paths
+import math_learning_state
+import math_workflow_storage
 
 ARCHIVE_ROOT = Path("/Volumes/T9-Data")
 ARCHIVE_PREFIX = "03_数学/资料库/原始会话资料"
@@ -47,6 +52,8 @@ TREES = {
     "线代讲义": "saved_reference_material",
     "概率论讲义": "saved_reference_material",
     "kaoyan_math_project_v2": "saved_reference_material",
+    "真题数据库": "exam_reference",
+    "错题知识网络/个人知识点索引/做题方法/公式结论": "formula_reference",
 }
 SINGLE_FILES = {
     "错题知识网络/知识点库.md": "knowledge_reference",
@@ -54,10 +61,13 @@ SINGLE_FILES = {
     "数学一回滚复习系统/复习记录.jsonl": "review_events",
     "数学一回滚复习系统/学习前5题记录.jsonl": "delivery_events",
     "数学一回滚复习系统/学习进度.json": "review_configuration",
+    "数学一回滚复习系统/公式记忆配置.json": "review_configuration",
     "数学一回滚复习系统/快速入库事件.jsonl": "capture_history",
     "数学一回滚复习系统/原始会话归档回执.jsonl": "archive_receipts",
 }
 EXCLUDED_PARTS = {"__pycache__", "scripts", "tools", "node_modules", ".git", ".obsidian", ".codex_tmp", ".pytest_cache", "backups", "backup", "正式提交后续", "operation_center", "agent_operation_center"}
+A_BATCH_DIRECTORY = "数学一回滚复习系统/A分包"
+STUDY_CONTEXT = "support/cmath/learning-context.json"
 
 
 class DescriptorError(ValueError):
@@ -82,6 +92,13 @@ def file_stamp(path: Path) -> dict[str, int]:
     return {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns, "inode": info.st_ino}
 
 
+def symlink_stamp(path: Path) -> tuple[Any, ...]:
+    info = path.lstat()
+    if not stat.S_ISLNK(info.st_mode):
+        raise DescriptorError("source_not_compat_symlink:" + str(path))
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, path.readlink())
+
+
 def safe_under(path: Path, root: Path) -> Path:
     try:
         relative = path.relative_to(root)
@@ -103,6 +120,87 @@ def business_file(path: Path) -> bool:
             and not path.name.endswith((".bak", ".backup", ".lock")))
 
 
+def ledger_context(path: Path, *, capture: bool = False) -> dict[str, Any]:
+    if not path.is_file():
+        return {"status": "not_present"}
+    checksum = hashlib.sha256()
+    counts, schemas = Counter(), Counter()
+    rows = [] if capture else None
+    invalid, total, size = 0, 0, 0
+    with path.open("rb") as handle:
+        for line in handle:
+            checksum.update(line)
+            size += len(line)
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError("expected object")
+            except (UnicodeError, ValueError):
+                invalid += 1
+                continue
+            total += 1
+            counts[str(row.get("event_type") or "unlabeled")[:80]] += 1
+            schemas[str(row.get("schema_version") or "unlabeled")[:100]] += 1
+            if rows is not None:
+                rows.append(row)
+    result = {"status": "complete_at_eof" if not invalid else "invalid_rows_at_eof",
+              "valid_rows": total, "invalid_rows": invalid, "by_event_type": dict(counts),
+              "by_schema": dict(schemas), "sha256": checksum.hexdigest(), "bytes": size}
+    if rows is not None and not invalid:
+        import quick_intake
+        try:
+            state = quick_intake.replay(rows)
+            result["capture_counts"] = {"recorded": len(state["captures"]),
+                                        "closed": len(state["closed_by"]),
+                                        "pending": len(state["captures"].keys() - state["closed_by"].keys()),
+                                        "basis": "native_replay_of_all_capture_events"}
+        except (quick_intake.QuickIntakeError, ValueError, TypeError, KeyError):
+            result["capture_counts"] = {"status": "native_replay_unavailable"}
+    return result
+
+
+def maintenance_summary(root, event_id, generation, scene_paths):
+    import math_postcommit as stages
+
+    if re.fullmatch(r"MATH-ENGINEERING-[0-9a-f]{64}", event_id):
+        # An engineering publication has no committed learning transaction.
+        # The descriptor has already checked scene dependencies and bytes.
+        recipe_ids = {Path(path).stem for path in scene_paths}
+        ready = {"riemann-signed-area", "gradient-direction"} <= recipe_ids
+        record = {"event_id": event_id, "handoff_kind": "engineering", "native_generation": generation,
+                  "required_components": ["concept_index", "study_recipes"],
+                  "concept_index": {"status": "ready", "native_generation": generation, "version": generation},
+                  "study_recipes": {"status": "ready" if ready else "pending", "native_generation": generation},
+                  "publication_event_id": event_id, "publication": {"status": "PENDING"}}
+        return stages.summarize_handoff(record, generation, publishing_snapshot=True)
+    if not stages.OPAQUE.fullmatch(event_id):
+        return stages.summarize_handoff({}, generation)
+    matches = []
+    if event_id.startswith("MATH-DERIVED-"):
+        # These existing receipts bind a one-way derived publication identity
+        # to the immutable learning event. No receipt bytes are exported.
+        for path in (root / stages.RECEIPTS).glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                row = json.loads(path.read_bytes())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            origin = row.get("event_id")
+            if (row.get("publication_event_id") == event_id and stages._safe_id(origin)
+                    and path == stages.receipt_path(root, origin)):
+                matches.append(row)
+    elif record := stages.read_handoff(root, event_id):
+        matches.append(record)
+    if len(matches) != 1:
+        return stages.summarize_handoff({}, generation)
+    return stages.summarize_handoff(matches[0], generation, publishing_snapshot=True)
+
+
 def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_ROOT) -> dict[str, Any]:
     root = Path(repo).resolve()
     archive_root = archive_root.resolve()
@@ -113,6 +211,15 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
     formal_ids = [p.stem.split("_", 1)[0] for p in cards]
     if not cards or len(formal_ids) != len(set(formal_ids)):
         raise DescriptorError("formal_library_missing_or_duplicate_ids")
+    # A shared Wiki cluster may change when another card is ingested. The old
+    # card's persisted state can then differ from load_state's live projection
+    # even though its own learning facts did not change. Refresh only state
+    # files already in this descriptor's formal-card scope, before recording
+    # their bytes/stamps; missing historical projections remain explicit gaps.
+    projection_ids = [identity for identity in formal_ids
+                      if math_learning_state.state_path(root, identity).is_file()]
+    if projection_ids:
+        math_learning_state.refresh_states(root, projection_ids)
     sources: dict[str, dict[str, Any]] = {}
     stamps: dict[str, dict[str, int]] = {}
     gaps: list[dict[str, Any]] = []
@@ -126,7 +233,8 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
         if key in stamps and stamps[key] != stamp:
             raise DescriptorError("source_changed_during_description:" + key)
         stamps[key] = stamp
-        row: dict[str, Any] = {"source_path": key, "publish_path": published, "kind": kind, "required": True, "visibility": "private_learning"}
+        row: dict[str, Any] = {"source_path": key, "publish_path": published, "kind": kind, "required": True,
+                               "visibility": "private_learning", "bytes": stamp["size"]}
         if stamp["size"] > 100 * 1024 * 1024:
             row["storage"] = "git-lfs"
         if identities:
@@ -139,6 +247,11 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
             row["role"] = role
         if path.name == "learning-state.json":
             value = json.loads(path.read_text())
+            identity = value.get("formal_id")
+            if (identity not in formal_ids
+                    or path != math_learning_state.state_path(root, identity)
+                    or value != math_learning_state.load_state(root, identity)):
+                raise DescriptorError("learning_state_projection_not_current:" + published)
             row["kind"] = "learning_state"
             row["state_source_version"] = value["source_version"]
         previous = sources.get(published)
@@ -157,6 +270,12 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
             return
         sources[published] = row
 
+    # Produce only explicitly reviewed, question-only corrections. Candidate
+    # calculation itself never writes materials or learner state.
+    import math_morning_ten
+    import math_teaching_visual as study_visual
+    if math_morning_ten.config(root).get("enabled") is True:
+        math_morning_ten.prepare_exam_surfaces(root)
     for relative, kind in TREES.items():
         directory = root / relative
         if directory.is_symlink():
@@ -168,12 +287,29 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
                 raise DescriptorError("business_source_symlink:" + str(path))
             if not path.is_file() or not business_file(path):
                 continue
+            if path.relative_to(root).is_relative_to(study_visual.STUDY_ASSETS):
+                continue
             safe_under(path, root)
             identity = path.stem.split("_", 1)[0]
             ids = [identity] if FORMAL_RE.fullmatch(identity) else []
             if path.parent.name in formal_ids:
                 ids = [path.parent.name]
             add(path, path.relative_to(root).as_posix(), kind, identities=ids)
+    scene_paths = []
+    for scene_id in study_visual.STUDY_MATCH:
+        checked = study_visual.checked_study_recipe(root, scene_id, "direct")
+        if checked is None:
+            gaps.append({"kind": "synthetic_study_scene_not_current", "scene_id": scene_id})
+            continue
+        scene, _ = checked
+        add(safe_under(root / scene["path"], root), scene["path"], "synthetic_study_scene",
+            expected_hash=scene["sha256"], role="synthetic_example")
+        scene_paths.append(scene["path"])
+    scene_manifest_path = (study_visual.STUDY_ASSETS / "manifest.json").as_posix()
+    if scene_paths:
+        file = safe_under(root / scene_manifest_path, root)
+        add(file, scene_manifest_path, "synthetic_study_scene_manifest",
+            expected_hash=hashlib.sha256(file.read_bytes()).hexdigest(), role="synthetic_example")
     for relative, kind in SINGLE_FILES.items():
         path = root / relative
         if path.exists():
@@ -181,13 +317,30 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
 
     # C handoffs cite the original A batch plan. Publish exactly those immutable
     # plans, not the entire exporter workspace or generated prompts.
-    for path in sorted((root / "数学一回滚复习系统/A分包").glob("A-BATCH-*/batch-plan.json")):
-        safe_under(path, root)
-        plan = json.loads(path.read_text())
+    batch_alias = root / A_BATCH_DIRECTORY
+    batch_directory = batch_alias
+    batch_link_stamp = None
+    if batch_alias.is_symlink():
+        # This named cold-workflow directory is the only compatibility link
+        # accepted here. The shared guard checks the actual mount, UUID, device
+        # and math subject boundary without creating or registering any files.
+        # Keep the old publication identity, but bind the physical T9 source so
+        # the publisher never needs to follow a local compatibility symlink.
+        batch_link_stamp = symlink_stamp(batch_alias)
+        batch_directory = math_workflow_storage.ensure_cold_output(batch_alias)
+        if batch_alias.readlink() != batch_directory:
+            raise DescriptorError("A_batch_compat_target_not_canonical")
+        if not batch_directory.is_dir():
+            raise DescriptorError("A_batch_compat_target_not_directory")
+    for path in sorted(batch_directory.glob("A-BATCH-*/batch-plan.json")):
+        safe_under(path, math_workflow_storage.T9 if batch_link_stamp else root)
+        raw = path.read_bytes()
+        plan = json.loads(raw)
         if (plan.get("batch_id") != path.parent.name
                 or plan.get("schema") != "math-A-topic-batch-plan-v1"):
             raise DescriptorError("invalid_A_batch_plan:" + str(path))
-        add(path, path.relative_to(root).as_posix(), "A_batch_plan")
+        published = (Path(A_BATCH_DIRECTORY) / path.relative_to(batch_directory)).as_posix()
+        add(path, published, "A_batch_plan", expected_hash=hashlib.sha256(raw).hexdigest())
 
     receipt_path = root / "数学一回滚复习系统/原始会话归档回执.jsonl"
     receipts = [json.loads(line) for line in receipt_path.read_text().splitlines() if line.strip()] if receipt_path.exists() else []
@@ -236,7 +389,7 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
 
     # Only explicit references can introduce files outside the business trees.
     # Do not crawl the user's attachment store, visualizations or data disk.
-    external_roots = [Path.home() / ".codex/attachments", Path.home() / ".codex/visualizations"]
+    external_roots = [math_runtime_paths.codex_home() / "attachments", math_runtime_paths.codex_home() / "visualizations"]
     texts = [Path(row["source_path"]) for row in sources.values() if Path(row["source_path"]).suffix.lower() in {".md", ".json"} and Path(row["source_path"]).is_relative_to(root)]
     for path in sorted(set(texts)):
         text = path.read_text(encoding="utf-8")
@@ -297,8 +450,12 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
     identity = study_personalization_math.current_identity(root)
     if identity["status"] != "ready":
         raise DescriptorError("math_personalization_" + identity["status"])
+    import math_formal_quality
+    binding = math_formal_quality.publication_binding(root, event_id)
+    export_generation = identity["version"] + ("-" + binding["generation_sha256"] if binding else "")
+    export_root = root / study_personalization_math.EXPORT_ROOT / export_generation
     personalization = study_personalization_math.export_snapshot(
-        root, root / study_personalization_math.EXPORT_ROOT / identity["version"])
+        root, export_root, formal_quality=binding)
     for row in personalization["files"]:
         add(Path(row["source_path"]), row["publish_path"], row["kind"],
             original=row.get("original_reference"), expected_hash=row.get("expected_sha256"))
@@ -320,6 +477,17 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
         path = root / relative
         if path.is_file():
             input_hashes[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    import math_morning_ten
+    for relative in math_morning_ten.extra_input_paths(root):
+        path = safe_under(root / relative, root)
+        input_hashes[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    exam_index_binding = None
+    if math_morning_ten.config(root).get("enabled") is True:
+        exam_index_path = safe_under(root / math_morning_ten.EXAM_DB, root)
+        exam_index_binding = {"path": str(math_morning_ten.EXAM_DB),
+                              "sha256": hashlib.sha256(exam_index_path.read_bytes()).hexdigest(),
+                              "published": False}
+        stamps[str(exam_index_path)] = file_stamp(exam_index_path)
     for relative, expected in input_hashes.items():
         path = safe_under(root / safe_relative(relative), root)
         add(path, relative, "native_math_workflow_input", expected_hash=expected)
@@ -336,20 +504,70 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
                 "personalization": {key: identity[key] for key in ("version", "formal_version")},
                 "inputs": [{"path": p, "sha256": sha} for p, sha in sorted(input_hashes.items())],
                 "components": components, "component_directories": component_directories}
+    if exam_index_binding is not None:
+        workflow["installed_exam_index"] = exam_index_binding
+        workflow["morning_formula_inputs"] = [str(p) for p in math_morning_ten.extra_input_paths(root)]
     workflow["version"] = hashlib.sha256(canonical(workflow)).hexdigest()
-    workflow_path = root / study_personalization_math.EXPORT_ROOT / identity["version"] / "workflow-bindings.json"
+    workflow_path = export_root / "workflow-bindings.json"
     study_personalization_math._write(workflow_path, canonical(workflow))
     workflow_published = "support/cmath/manifest.json"
     workflow_hash = hashlib.sha256(canonical(workflow)).hexdigest()
     add(workflow_path, workflow_published, "native_math_workflow_manifest", expected_hash=workflow_hash)
     workflow_entry = {"schema": workflow["schema"], "version": workflow["version"],
                       "path": workflow_published, "sha256": workflow_hash}
+    event_roles = {
+        "capture_history": "数学一回滚复习系统/快速入库事件.jsonl",
+        "review_events": "数学一回滚复习系统/复习记录.jsonl",
+        "delivery_events": "数学一回滚复习系统/学习前5题记录.jsonl",
+    }
+    event_coverage = {}
+    for role, relative in event_roles.items():
+        path = root / relative
+        summary = ledger_context(safe_under(path, root) if path.is_file() else path,
+                                 capture=role == "capture_history")
+        event_coverage[role] = {"path": relative, **summary}
+        if summary.get("sha256"):
+            add(path, relative, role, expected_hash=summary["sha256"])
+    role_files: dict[str, dict[str, int]] = {}
+    for row in sources.values():
+        grouped = role_files.setdefault(row["kind"], {"files": 0, "bytes": 0})
+        grouped["files"] += 1
+        grouped["bytes"] += row["bytes"]
+    context = {
+        "schema": "native-math-study-context-v1", "subject": "math",
+        "scope": "declared_saved_math_sources_not_whole_machine",
+        "source_versions": {**workflow["personalization"], "native_workflow": workflow["version"]},
+        "formal_card_count": {"count": len(formal_ids), "basis": "unique_formal_filenames"},
+        "question_asset_coverage": {"formal_cards_with_declaration": len(formal_ids) - len(missing_question_images),
+                                    "formal_cards_without_declaration": len(missing_question_images)},
+        "archive_receipt_count": len(receipts),
+        "events": event_coverage, "descriptor_file_roles": role_files,
+        "synthetic_scene_paths": scene_paths,
+        "synthetic_scene_manifest": scene_manifest_path if scene_paths else None,
+        "coverage_gaps_by_kind": dict(Counter(row["kind"] for row in gaps)),
+        "count_semantics": "files_are_source_files; events_are_valid_rows_at_eof; captures_use_native_replay",
+        "display_assets_do_not_record_independent_mastery": True,
+        "maintenance_summary": maintenance_summary(root, event_id, identity["version"], scene_paths),
+    }
+    content = canonical(context)
+    context_hash = hashlib.sha256(content).hexdigest()
+    context_path = export_root / "learning-context" / (context_hash + ".json")
+    study_personalization_math._write(context_path, content)
+    add(context_path, STUDY_CONTEXT, "math_study_context_manifest", expected_hash=context_hash,
+        role="source_structure_metadata")
     if study_personalization_math.current_identity(root) != identity:
         raise DescriptorError("math_personalization_changed_during_workflow_binding")
+    if maintenance_summary(root, event_id, identity["version"], scene_paths) != context["maintenance_summary"]:
+        raise DescriptorError("math_maintenance_summary_changed_during_description")
 
     for key, previous in stamps.items():
         if file_stamp(Path(key)) != previous:
             raise DescriptorError("source_changed_during_description:" + key)
+    if batch_link_stamp is not None:
+        if (not batch_alias.is_symlink()
+                or symlink_stamp(batch_alias) != batch_link_stamp
+                or batch_alias.resolve(strict=True) != batch_directory):
+            raise DescriptorError("A_batch_compat_link_changed_during_description")
     # Detect additions/removals at formal and event boundaries without relying
     # on tracked Git files as the library denominator.
     if [p.stem.split("_", 1)[0] for p in sorted(card_root.glob("*.md")) if FORMAL_RE.fullmatch(p.stem.split("_", 1)[0])] != formal_ids:
@@ -361,7 +579,8 @@ def describe(repo: Path | str, event_id: str, *, archive_root: Path = ARCHIVE_RO
         "entrypoints": {"formal_cards": "错题知识网络/错题卡/", "history_index": "错题知识网络/生成/wrong_questions.json",
                         "review_events": "数学一回滚复习系统/复习记录.jsonl", "capture_events": "数学一回滚复习系统/快速入库事件.jsonl",
                         "personal_state": "错题知识网络/教学投影/",
-                        "personalization": personalization["entrypoint"]},
+                        "personalization": personalization["entrypoint"],
+                        "study_context": STUDY_CONTEXT},
         "personalization": {k: personalization[k] for k in ("version", "formal_version", "entrypoint")},
         "native_math_workflow": workflow_entry,
         "history_index": "错题知识网络/生成/wrong_questions.json",

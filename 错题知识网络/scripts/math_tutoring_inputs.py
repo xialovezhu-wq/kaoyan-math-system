@@ -156,6 +156,10 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
                                        (["response.problem_solving"] if value.get("problem_solving") else []))
                                      for row in rows]}
 
+    recipe = None
+    if add_exact and domain_ok and not protected and repo is not None and operation:
+        from math_teaching_visual import suggest_study_recipe
+        recipe = suggest_study_recipe(repo, operation, result["view"])
     value = {**result, "teaching_inputs": decision}
     if len(encoded(value)) > max_bytes and domain_ok and not protected:
         value = compact_before_omitting(value)
@@ -169,6 +173,12 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
             if len(encoded(value)) > max_bytes:
                 value = compact_before_omitting(value)
             needed = len(encoded(value))
+            if (needed > max_bytes and prior.get("status") == "available"
+                    and (value.get("problem_solving") or {}).get("detail_status") == "first_action_and_conditions_only"):
+                # Keep the exact observation before a textbook preview that
+                # the current question can explicitly request later.
+                value.pop("problem_solving")
+                needed = len(encoded(value))
             if needed > max_bytes and prior.get("status") == "available" and result["view"] == "after_attempt":
                 # The enclosing response already binds the formal ID, and
                 # observation positions/notes stay on their immutable source.
@@ -188,6 +198,10 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
                     point["exact_question_prior"].pop("required_min_bytes")
                     if len(encoded(value)) > max_bytes:
                         point.pop("exact_question_prior")
+        if recipe:
+            decision["study_recipe"] = recipe
+            if len(encoded(value)) > max_bytes:
+                decision.pop("study_recipe")
         if isinstance(result.get("version"), str):
             version = hashlib.sha256(encoded(["math-teaching-roles-v1", result["version"], decision])).hexdigest()
             if len(encoded({**value, "version": version})) <= max_bytes:
@@ -206,4 +220,14 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
     # The extra pointers never evict the methods, conditions or evidence itself.
     status = {**result, "teaching_inputs_status": "budget_omitted",
               "teaching_inputs_required_min_bytes": len(encoded(value))}
+    if recipe:
+        # A checked synthetic asset can fit even when all the teaching roles
+        # cannot. Preserve the budget warning and the original evidence.
+        small = {k: decision[k] for k in ("visual_entry", "visual_scope")}
+        small["study_recipe"] = recipe
+        reduced = {**status, "teaching_inputs": small}
+        if isinstance(result.get("version"), str):
+            reduced["version"] = hashlib.sha256(encoded(["math-study-recipe-v1", result["version"], small])).hexdigest()
+        if len(encoded(reduced)) <= max_bytes:
+            return reduced
     return status if len(encoded(status)) <= max_bytes else result

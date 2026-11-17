@@ -104,7 +104,8 @@ def _delivered(result, requested_view):
             groups.setdefault(field, []).extend(
                 [f"{target}/{i}" for i in range(len(part))] if isinstance(part, list) else [target])
 
-    present(result, "", ("problem_solving", "exam_frequency", "choice_fill_guidance"))
+    present(result, "", ("problem_solving", "exam_frequency", "choice_fill_guidance", "material_readback",
+                         "omitted_method_ids"))
     present(result.get("recap"), "/recap", ("basic_formulas", "secondary_conclusions", "solution_methods"))
     for i, row in enumerate(result.get("records", [])):
         prefix = f"/records/{i}"
@@ -114,7 +115,7 @@ def _delivered(result, requested_view):
             present(row, prefix, ("short_summary", "next_check"))
     memory = result.get("memory_context") or {}
     for key, fields in (
-        ("personal_judgments", ("claims", "conflicts")),
+        ("personal_judgments", ("claims", "conflicts", "omitted_claims", "claim_readback", "claim_ids")),
         ("personal_records", ("records",)),
         ("pending_evidence", ("records",)),
     ):
@@ -203,6 +204,8 @@ def emit_audit(result, *, args, began_ns, exit_status):
               "pending_whole_capture", "structured_math", "confirmed_concept", "selection_receipt",
               "selection_basis", "selection_abstain", "backend_config")
     scope = {key: getattr(args, key, None) for key in fields}
+    if getattr(args, 'claim_id', None) is not None:
+        scope['claim_id'] = args.claim_id
     if scope["backend_config"] is not None:
         scope["backend_config"] = str(scope["backend_config"])
     receipt = {

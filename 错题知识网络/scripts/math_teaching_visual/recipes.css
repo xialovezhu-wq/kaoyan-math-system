@@ -1,0 +1,36 @@
+#__ROOT_ID__ .math-recipe { --ink-a: #147d88; --ink-b: #a44b29; --grid: #8795a4; display: grid; gap: .65rem; }
+#__ROOT_ID__ .math-recipe :is(p, fieldset, table, dd, dt, legend) { margin: 0; }
+#__ROOT_ID__ .math-recipe :is(fieldset, .recipe-buttons) { display: flex; flex-wrap: wrap; gap: .4rem .8rem; min-inline-size: 0; }
+#__ROOT_ID__ .math-recipe fieldset { border: 1px solid var(--border, #95a2ae); border-radius: .4rem; padding: .45rem .6rem; }
+#__ROOT_ID__ .math-recipe legend { padding-inline: .25rem; }
+#__ROOT_ID__ .math-recipe label { display: inline-flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
+#__ROOT_ID__ .math-recipe input { accent-color: var(--ink-a); min-inline-size: 0; }
+#__ROOT_ID__ .math-recipe input[type=range] { inline-size: min(190px, 100%); }
+#__ROOT_ID__ .math-recipe button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--border, #95a2ae); border-radius: .35rem; padding: .27rem .55rem; cursor: pointer; }
+#__ROOT_ID__ .math-recipe :is(button, input):focus-visible { outline: 2px solid var(--ink-a); outline-offset: 2px; }
+#__ROOT_ID__ .math-recipe button:disabled { cursor: default; opacity: .55; }
+#__ROOT_ID__ .recipe-controls { display: flex; flex-wrap: wrap; gap: .4rem 1rem; }
+#__ROOT_ID__ .recipe-controls label { display: grid; align-content: start; min-inline-size: 0; }
+#__ROOT_ID__ .recipe-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem .65rem; }
+#__ROOT_ID__ .recipe-metrics div { padding-inline-start: .45rem; border-inline-start: 2px solid var(--grid); }
+#__ROOT_ID__ .recipe-metrics dd { font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#__ROOT_ID__ .recipe-metrics dt { font-size: .85em; }
+#__ROOT_ID__ .recipe-sign-legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; font-size: .85em; }
+#__ROOT_ID__ .recipe-sign-legend span { border-block-end: 2px solid var(--ink-a); }
+#__ROOT_ID__ .recipe-sign-legend .recipe-negative { border-color: var(--ink-b); border-block-end-style: dashed; }
+#__ROOT_ID__ .recipe-readout { border-inline-start: .22rem solid var(--ink-a); padding: .4rem .65rem; overflow-wrap: anywhere; }
+#__ROOT_ID__ .recipe-caption { opacity: .82; font-size: .88em; }
+#__ROOT_ID__ .recipe-plot { display: block; box-sizing: border-box; inline-size: 100%; block-size: auto; max-block-size: 25rem; border: 1px solid var(--border, #95a2ae); border-radius: .4rem; touch-action: none; }
+#__ROOT_ID__ .recipe-plot text { fill: currentColor; font: 16px ui-sans-serif, system-ui, sans-serif; paint-order: stroke; }
+#__ROOT_ID__ .recipe-plot :is(path, line, polyline, polygon) { vector-effect: non-scaling-stroke; }
+#__ROOT_ID__ .recipe-matrix { border-collapse: separate; border-spacing: 2px; width: 100%; max-width: 37rem; table-layout: fixed; font-variant-numeric: tabular-nums; font-size: .86em; text-align: center; }
+#__ROOT_ID__ .recipe-matrix :is(th, td) { padding: 0; text-align: center; overflow-wrap: anywhere; }
+#__ROOT_ID__ .recipe-matrix button { width: 100%; min-height: 30px; padding: .17rem 0; border-radius: .2rem; }
+#__ROOT_ID__ .recipe-matrix button[data-positive=true] { box-shadow: inset 0 -2px var(--ink-a); }
+#__ROOT_ID__ .recipe-matrix button[aria-pressed=true] { outline: 2px solid var(--ink-b); outline-offset: -2px; font-weight: 700; }
+#__ROOT_ID__ .recipe-matrix th, #__ROOT_ID__ .recipe-matrix .recipe-marginal { font-weight: 650; }
+@container visual-explanation (max-width: 400px) {
+  #__ROOT_ID__ .recipe-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #__ROOT_ID__ .recipe-matrix { font-size: .76em; border-spacing: 1px; }
+  #__ROOT_ID__ .recipe-caption { font-size: .83em; }
+}

@@ -1,0 +1,36 @@
+{
+  "schema": "math_study_recipes_v1",
+  "authority": "synthetic_example",
+  "recipes": {
+    "saddle-sections-tangent": {
+      "scene_version": 1,
+      "title": "同一点的截线与切平面",
+      "parameters": {"coefficients": [1, -1], "point": [0, 0, 0], "half_span": 1.35},
+      "math_status": "exact_sections_and_tangent_plane_sampled_surface_mesh"
+    },
+    "eigen-directions": {
+      "scene_version": 1,
+      "title": "变换后的方向与零输出",
+      "parameters": {"diagonals": [[2, -1], [2, 0]]},
+      "math_status": "exact_axes_and_zero_case_numeric_drag"
+    },
+    "same-distribution-vs-independence": {
+      "scene_version": 1,
+      "title": "边缘分布相同的两种联合分布",
+      "parameters": {"faces": [1, 2, 3, 4, 5, 6]},
+      "math_status": "exact_discrete_joint_and_marginal_probabilities"
+    },
+    "riemann-signed-area": {
+      "scene_version": 1,
+      "title": "有符号黎曼和与几何面积",
+      "parameters": {"coefficients": [-1, 1], "bounds": [-2, 2], "interval": [-2, 2], "n": 8},
+      "math_status": "midpoint_sum_exact_polynomial_integral_and_piecewise_area"
+    },
+    "gradient-direction": {
+      "scene_version": 1,
+      "title": "等高线上的方向导数",
+      "parameters": {"coefficients": [3, -1, -2], "point": [0.5, 0.5], "angle": 0},
+      "math_status": "analytic_ellipses_unit_direction_and_zero_gradient"
+    }
+  }
+}

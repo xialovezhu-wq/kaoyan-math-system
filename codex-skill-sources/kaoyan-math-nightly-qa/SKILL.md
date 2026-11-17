@@ -68,7 +68,7 @@ Read `数学一回滚复习系统/schema/quick_intake_events.md`. Resolve identi
 
 ```bash
 python3 数学一回滚复习系统/scripts/quick_intake.py freeze \
-  --payload-file /Volumes/Study-Archive/03_数学/资料库/网页加工中间文件/DATE/BATCH/freeze.json \
+  --payload-file /Volumes/T9-Data/03_数学/资料库/网页加工中间文件/DATE/BATCH/freeze.json \
   --consume-payload-file
 ```
 
@@ -93,6 +93,8 @@ Every delegated read is bounded, read-only and tied to exact frozen paths/hashes
 Do not revive Terra, Provider, MCP resolver/consumer, AnalysisPackage, Dispatcher or background formal-intake routes. Native engineering delegation is separate from the single-agent tutoring entry, which runs on the user-selected model.
 
 ## Parent Formal Decisions
+
+沿同一次正式审阅，在已有读取回执、实际响应与原会话可见回答能回指时填写 `reviewed.memory_use`，按数学运行根的 `数学一回滚复习系统/schema/formal_quality_v1.md` 核对象、条件、同一子问和实际改变的一处讲法。finalize 回传私有采用检查，仅有事后复核或缺原始证据时保留 `not_established`。图解操作及助手自报不登记为独立作答。派生缺失只续原批次的本地检查。
 
 当前冻结批次先读已有 `math_formal_quality.py begin` 返回的精确、标签与同版向量候选、Decisions 及同 Capture 的顺序证据，再决定采纳、按条件分开或保留不确定。候选同形或向量接近不能判同一结论；来源、对象、定义域、量词和推出方向必须对齐。模型回执是冷路径建议，父任务复核、原 writer 串行提交；API 未核验或失败不算完成模型裁决。
 
@@ -165,7 +167,7 @@ python3 数学一回滚复习系统/scripts/math_formal_lint.py \
    ```bash
    python3 错题知识网络/scripts/math_teaching_context.py \
      --repo . \
-     materialize --input /Volumes/Study-Archive/03_数学/资料库/网页加工中间文件/DATE/BATCH/context-FORMAL_ID.json
+     materialize --input /Volumes/T9-Data/03_数学/资料库/网页加工中间文件/DATE/BATCH/context-FORMAL_ID.json
    ```
 
    Require the returned `context_path`, `context_sha256`, `pointer_path` and `pointer_sha256`. Re-run `verify --formal-id FORMAL_ID` and require `status=valid`. Do not bind a closeout ID into this pre-closeout file. A missing, stale, answer-unsafe or mismatched slice blocks closeout; it does not authorize repeating an already-applied formal writer.
@@ -197,7 +199,7 @@ python3 数学一回滚复习系统/scripts/archive_conversation_package.py \
   --closeout-id MFI-CLOSE-ID \
   --terminal-outcome curated \
   --formal-id GS-000 \
-  --archive-root /Volumes/Study-Archive \
+  --archive-root /Volumes/T9-Data \
   --subject-relative-root '03_数学/资料库/原始会话资料'
 ```
 
@@ -254,6 +256,8 @@ Use `数学正式入库与原始包归档完成` only when both closeout and eve
 When choosing the formal solution representation, preserve the correct, fast and reliable single exam mainline owned by question-worker; do not replace a learner-approved route with multiple full derivations. Complete original dialogue and solution bytes remain intact. Teaching uses its separate tutoring task on the user-selected model and complete 30-second target/40-second ceiling; formal curation retains the selected engineering runtime.
 
 A successful closeout invokes the subject postcommit hook after releasing its write locks. The hook refreshes formal learning state and the local personal index. On retry, resume the affected derived step under the original event ID. New formal evidence becomes available to the next related teaching turn after local refresh.
+
+交接使用原生 `maintenance_summary`。分别给正式事实、原事件或维护 ID、同版必需与可选组件、发布和独立读回。`completed_local` 沿用核心刷新含义，待恢复阶段和原失败保留在原回执；按 `recovery.actions` 续接，发布阶段使用原发布身份。没有同版阶段依据时保留 unknown 或 stale，不补写学习。外部资料的 `source_verified` 只供参考；独立步骤和明确偏好依赖原生核验的用户轮次。
 
 ## Current Project A Advice
 

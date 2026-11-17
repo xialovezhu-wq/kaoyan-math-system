@@ -366,6 +366,51 @@ def _user_quote_matches(value, ref):
     return _role_quote_matches(value, ref, 'user')
 
 
+def _owned_turns(root, ref):
+    """Read turns from the owning math envelope, never from nested tool data."""
+    try:
+        safe_source(root, ref)
+        path = Path(ref['path'])
+        parts = path.parts
+        if (len(parts) == 5 and parts[:2] == ('数学一回滚复习系统', '快速入库来源')
+                and re.fullmatch(r'\d{4}-\d{2}-\d{2}', parts[2])
+                and re.fullmatch(r'MATHPKG-[0-9a-f]{24}', parts[3]) and path.name == 'conversation.json'):
+            manifest_path, receipt_path = (root/path.parent/name for name in ('manifest.json', 'receipt.json'))
+            if any(p.is_symlink() or p.resolve() != p for p in (manifest_path, receipt_path)):
+                return []
+            manifest, receipt = (json.loads(p.read_bytes()) for p in (manifest_path, receipt_path))
+            binding = manifest['files']['conversation']
+            fields = ('schema_version', 'package_id', 'subject', 'study_date', 'timezone', 'source_locator',
+                      'files', 'artifacts', 'missing_fields', 'formal_write_count', 'background_processing')
+            if (manifest['schema_version'] == 'math-conversation-package-v1' and manifest['subject'] == 'math'
+                    and manifest['package_id'] == receipt['package_id'] == parts[3] and manifest['study_date'] == parts[2]
+                    and receipt['schema_version'] == 'math-conversation-package-receipt-v1'
+                    and binding['path'] == path.as_posix() and binding['sha256'] == ref['sha256']
+                    and digest({k: manifest[k] for k in fields}) == manifest['canonical_sha256'] == receipt['canonical_sha256']):
+                document = json.loads((root/path).read_bytes())
+                if (document['schema_version'] == 'math-conversation-v1' and document['subject'] == 'math'
+                        and document['package_id'] == parts[3] and isinstance(document['turns'], list)):
+                    return document['turns']
+        import math_concept_review
+        if (path.parent.parent == math_concept_review.SESSIONS and path.name == 'session.json'
+                and re.fullmatch(r'CONCEPT-REVIEW-[0-9a-f]{32}', path.parent.name)):
+            session = math_concept_review.load_session(root, root/path)
+            return session['payload']['conversation']
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return []
+
+
+def _owned_quote(turns, ref, role):
+    return any(isinstance(turn, dict) and turn.get('role') == role
+               and ('sequence' not in ref or turn.get('sequence') == ref['sequence'])
+               and ref['quote'] in _turn_text(turn) for turn in turns)
+
+
+def _recorded_role_quote(root, ref, role):
+    return _owned_quote(_owned_turns(root, ref), ref, role)
+
+
 def compact_preferences(preferences):
     return [{k: value[k] for k in ('basis', 'scope', 'approach', 'avoid', 'focus') if k in value}
             for value in preferences]
@@ -442,6 +487,14 @@ def _prepare_preferences(root, row):
         if removed and (not isinstance(reason, str) or not reason.strip()):
             raise ValueError('teaching_preferences_revision_reason_required')
     _validate_preferences(root, row)
+    for pref in row.get('teaching_preferences', []):
+        older = [old for old in previous if all(old.get(k) == pref.get(k)
+                 for k in ('basis', 'scope', 'approach', 'avoid', 'focus'))]
+        fields = ('sha256', 'role', 'sequence', 'quote')
+        previous_sources = {tuple(ref.get(k) for k in fields) for old in older for ref in old['source_refs']}
+        for ref in pref['source_refs']:
+            if tuple(ref.get(k) for k in fields) not in previous_sources and not _recorded_role_quote(root, ref, 'user'):
+                raise ValueError('teaching_preference_requires_native_user_turn')
     refs = row.get('source_refs', [])
     if not isinstance(refs, list) or any(not isinstance(r, dict) or
             not isinstance(r.get('path'), str) or not isinstance(r.get('sha256'), str) for r in refs):
@@ -567,7 +620,16 @@ def _validate_new_step_order(root, values, previous):
     for value in values:
         if value in previous or value['state'] not in ('independent_performed', 'corrected_after_hint'):
             continue
+        if any(not _removed_step_evidence([old], [value]) for old in previous):
+            continue
         user, hints = value.get('user_evidence'), value.get('hint_evidence')
+        owned = [(ref, turns) for ref in value['source_refs'] if (turns := _owned_turns(root, ref))]
+        typed_user = isinstance(user, list) and bool(user) and isinstance(user[0], dict)
+        genuine = (all(any(_owned_quote(turns, atom, 'user') for _, turns in owned) for atom in user)
+                   if typed_user else any(ref.get('role') == 'user' and ref.get('quote')
+                                          and _owned_quote(turns, ref, 'user') for ref, turns in owned))
+        if not genuine:
+            raise ValueError('step_evidence_requires_native_learner_source')
         if not user or not hints or not all(isinstance(atom, dict) for atom in [*user, *hints]):
             continue  # legacy prose and single-role observations require local semantic review
         # Sequence numbers only order turns from the same source conversation.
@@ -575,13 +637,9 @@ def _validate_new_step_order(root, values, previous):
         # deciding whether the displayed action followed the stated hint.
         same_transcript = False
         earlier_hint = False
-        for path in {ref['path'] for ref in value['source_refs']}:
-            try:
-                source = json.loads((root/path).read_text())
-            except (ValueError, UnicodeError):
-                continue
-            users = [atom['sequence'] for atom in user if _role_quote_matches(source, atom, 'user')]
-            assistance = [atom['sequence'] for atom in hints if _role_quote_matches(source, atom, 'assistant')]
+        for _, turns in owned:
+            users = [atom['sequence'] for atom in user if _owned_quote(turns, atom, 'user')]
+            assistance = [atom['sequence'] for atom in hints if _owned_quote(turns, atom, 'assistant')]
             if users and assistance:
                 same_transcript = True
                 earlier_hint |= min(assistance) < max(users)
@@ -746,7 +804,7 @@ def _after_attempt_personal_context(value):
     return value
 
 
-def _low_budget_personal(base, personal, frequency, max_bytes):
+def _low_budget_personal(base, personal, frequency, max_bytes, *, compact_teaching=False, method=None):
     """Keep one complete reviewed short summary if the combined math bundle cannot fit."""
     if not personal or base.get('status') != 'budget_too_small':
         return None
@@ -755,13 +813,56 @@ def _low_budget_personal(base, personal, frequency, max_bytes):
     slim = {key: base[key] for key in ('version', 'source_version', 'identity', 'view',
                                       'total', 'required_min_bytes') if key in base}
     slim.update(status='available', records=[personal], returned=1, truncated=True,
-                material_status='combined_context_omitted_for_budget',
-                detail_lookup='same_identity_concepts_and_view_with_required_budget')
+                material_status='combined_context_omitted_for_budget')
+    if not compact_teaching:
+        slim['detail_lookup'] = 'same_identity_concepts_and_view_with_required_budget'
     if frequency:
+        if compact_teaching:
+            # The teaching view announces counts, tier and scope. Defer year
+            # lists and repeated display copy while keeping mapping/coverage.
+            frequency = copy.deepcopy(frequency)
+            for field in ('display_policy', 'count_policy'):
+                frequency.pop(field, None)
+            for topic in frequency.get('topics', []):
+                for window in topic.get('windows', {}).values():
+                    for field in ('years', 'year_count', 'available_year_count'):
+                        window.pop(field, None)
         slim['exam_frequency'] = frequency
         if len(canonical(slim).encode()) > max_bytes:
             slim.pop('exam_frequency')
+    if compact_teaching and method and method.get('status') == 'available':
+        primary = method.get('primary_method_id')
+        route = next((r for r in method.get('routes', []) if r.get('method_id') == primary), None) if primary else None
+        if (route and route.get('status', 'available') == 'available' and not route.get('binding_status')
+                and route.get('first_action') and route.get('conditions')):
+            preview = {key: route[key] for key in ('method_id', 'conditions', 'first_action', 'source_status',
+                                                  'applicability', 'current_concept_applicability')
+                       if key in route}
+            slim['problem_solving'] = {'status': 'available', 'primary_method_id': primary,
+                                       'selection_status': method.get('selection_status'), 'routes': [preview],
+                                       'detail_status': 'first_action_and_conditions_only'}
+            if len(canonical(slim).encode()) > max_bytes:
+                slim.pop('problem_solving')
     return slim if len(canonical(slim).encode()) <= max_bytes else None
+
+
+def _teaching_method_preview(method):
+    """Keep whole conditions and source locators from already checked routes."""
+    if not method or method['status'] not in ('available', 'partial'):
+        return None
+    keys = ('method_id', 'name', 'role', 'status', 'source_status', 'binding_status', 'first_action', 'conditions')
+    routes = []
+    for route in method.get('routes', []):
+        if (route.get('status') == 'stale' or not str(route.get('source_status', '')).startswith('verified_')
+                or not (route.get('first_action') and route.get('conditions') and route.get('source_refs'))):
+            continue
+        refs = [{k: ref[k] for k in ('path', 'sha256', 'source_role', 'pdf_pages', 'section', 'locator')
+                 if k in ref and (k != 'section' or not ref.get('pdf_pages'))} for ref in route['source_refs']]
+        routes.append({**{k: route[k] for k in keys if k in route}, 'source_refs': refs})
+    if not routes:
+        return None
+    return {**{k: method[k] for k in ('status', 'primary_method_id', 'selection_status', 'current_concept_key')
+               if k in method}, 'routes': routes, 'detail_status': 'first_action_conditions_and_sources'}
 
 
 def _semantic_revision_archive(root, path, old, row):
@@ -824,6 +925,16 @@ def _maintenance_basis(conn, meta):
     }
 
 
+def _claim_revision_targets(payload, *, prepared=False):
+    rows = payload.get('updates')
+    targets = {row.get('concept_key'): row['claim_revision_targets'] for row in rows
+               if isinstance(row, dict) and 'claim_revision_targets' in row} if isinstance(rows, list) else {}
+    if (prepared or '_basis_claim_revision_targets' in payload) and (
+            payload.get('_basis_claim_revision_targets', {}) != targets):
+        raise ValueError('memory_claim_revision_targets_changed_since_preparation')
+    return targets
+
+
 def prepare_updates(repo_root, payload, *, prospective_concepts=()):
     root = Path(repo_root).resolve()
     if (not isinstance(payload, dict) or payload.get('schema') != SCHEMA
@@ -852,6 +963,7 @@ def prepare_updates(repo_root, payload, *, prospective_concepts=()):
             review_ids[key]={rid:sorted(str(item.get('event',{}).get('event_id')) for item in value.get('history',{}).get('review_events',[]) if item.get('event',{}).get('event_id'))
                              for rid,value in values.items() if value.get('kind')=='personal_card'}
     seen, updates = set(), []
+    claim_targets = _claim_revision_targets(payload)
     for row in payload['updates']:
         key = row.get('concept_key')
         if (key not in known and key not in prospective_concepts) or key in seen:
@@ -893,6 +1005,8 @@ def prepare_updates(repo_root, payload, *, prospective_concepts=()):
         path = root/SEMANTIC/(key+'.json')
         profile_versions[key] = json.loads(path.read_text()).get('content_sha256') if path.is_file() else None
     extension = {'memory_corrections': corrections} if corrections else {}
+    if claim_targets:
+        extension['_basis_claim_revision_targets'] = claim_targets
     return {**payload, **extension, **maintenance_basis, '_basis_cited_sources': cited_sources,
             '_basis_profile_versions': profile_versions, '_basis_memory_version': memory.version(root),
             'basis_version':meta['version'], '_basis_records':basis,
@@ -918,6 +1032,26 @@ def _maintenance_id(payload, reason):
     return 'MATH-PROFILE-MAINT-'+digest({'prepared': payload, 'maintenance_reason': reason})
 
 
+def _replayed_profile_sources(root, payload, maintenance_id):
+    """A committed revision can drop a citation from the derived source index."""
+    import math_memory_lifecycle as memory
+    refs = set()
+    for row in payload['updates']:
+        key = row['concept_key']
+        previous = payload.get('_basis_profile_versions', {}).get(key)
+        path = root/SEMANTIC/(key+'.json')
+        if not isinstance(previous, str) or not re.fullmatch(r'[0-9a-f]{64}', previous) or not path.is_file():
+            continue
+        saved = memory._safe_json(root, path)
+        if saved.get('maintenance_id') != maintenance_id or saved.get('memory_predecessor') != previous:
+            continue
+        old = memory._safe_json(root, path.parent/'历史版本'/key/(previous+'.json'))
+        if old.get('content_sha256') != previous or digest({k: v for k, v in old.items() if k != 'content_sha256'}) != previous:
+            raise ValueError('profile_revision_predecessor_invalid:'+key)
+        refs.update((ref['path'], ref['sha256']) for ref in old['source_refs'])
+    return refs
+
+
 def _accept_maintenance(root, payload, maintenance_reason):
     if not isinstance(payload, dict):
         raise ValueError('profile_update_schema_required')
@@ -933,8 +1067,10 @@ def _accept_maintenance(root, payload, maintenance_reason):
                 '_basis_cited_sources')
     if any(field not in payload for field in required) or not payload['basis_version']:
         raise ValueError('profile_maintenance_must_be_prepared')
+    _claim_revision_targets(payload, prepared=True)
     prepared = prepare_updates(root, {**payload, 'basis_version': None})
     import math_memory_lifecycle as memory
+    maintenance_id = _maintenance_id(payload, reason)
     keys = {row['concept_key'] for row in prepared['updates']} | {row['concept_key'] for row in prepared.get('memory_corrections', [])}
     for field in ('_basis_records', '_basis_review_event_ids'):
         if not isinstance(payload[field], dict) or set(payload[field]) != keys:
@@ -950,12 +1086,17 @@ def _accept_maintenance(root, payload, maintenance_reason):
             # frozen in _basis_cited_sources; unrelated index changes still fail.
             current = {path: value for path, value in current.items()
                        if path in previous or payload['_basis_cited_sources'].get(path) != value}
+            dropped = previous.keys() - current.keys()
+            if dropped:
+                predecessor_refs = _replayed_profile_sources(root, payload, maintenance_id)
+                current.update({path: previous[path] for path in dropped
+                                if (path, previous[path]['sha256']) in predecessor_refs})
         if previous != current:
             raise ValueError('profile_maintenance_evidence_changed:'+field)
     import math_concept_index as native
     # Do not trust a matching SQLite version: files may have changed without a
     # refresh. Hash every frozen source and check stamps on both sides of reads.
-    for path, expected in {**prepared['_basis_cited_sources'], **prepared['_basis_sources']}.items():
+    for path, expected in {**prepared['_basis_cited_sources'], **payload['_basis_sources']}.items():
         if native._stamp(root/path) != expected['stamp']:
             raise ValueError('profile_source_stamp_changed:'+path)
         safe_source(root, {'path': path, 'sha256': expected['sha256']})
@@ -965,7 +1106,6 @@ def _accept_maintenance(root, payload, maintenance_reason):
         for path, stamp in prepared[field].items():
             if native._stamp(root/path) != stamp:
                 raise ValueError('profile_source_stamp_changed:'+path)
-    maintenance_id = _maintenance_id(payload, reason)
     reserved = {'schema', 'status', 'event_id', 'event_ids', 'maintenance_id', 'maintenance_reason',
                 'basis_version', 'through_event_ids', 'card_evidence_versions',
                 'evidence_record_versions', 'evidence_review_event_ids', 'content_sha256', 'memory_recorded_at', 'memory_predecessor'}
@@ -1060,9 +1200,27 @@ def finish_maintenance(repo_root, result, refresh_only=False, *, publish=False):
         raise ValueError("profile_maintenance_refresh_only_conflicts_with_publication")
     root = Path(repo_root).resolve()
     import math_concept_index as native
-    refreshed = native.build_index(root)
-    result = {**result, 'refresh': {k: refreshed[k] for k in ('status', 'version', 'concept_count', 'record_count')},
-              'refresh_required': False}
+    rollback_scripts = str(Path(__file__).resolve().parents[2]/'数学一回滚复习系统/scripts')
+    if rollback_scripts not in sys.path:
+        sys.path.insert(0, rollback_scripts)
+    import math_postcommit
+    identity = result['maintenance_id']
+    previous = math_postcommit.read_handoff(root, identity)
+    required = ['concept_index', 'personal_record_scopes', 'user_utterances']
+    optional = []
+    (required if math_postcommit.retrieval_required(root) else optional).append('retrieval_backend')
+    result = {**result, 'handoff_kind': 'semantic_maintenance', 'required_components': required,
+              'optional_components': optional, 'publication': {'status': 'PENDING' if publish else 'NOT_REQUESTED'}}
+    if publish:
+        result['publication_event_id'] = identity
+    try:
+        refreshed = native.build_index(root)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        result['refresh'] = {'status': 'failed', 'reason': str(exc)}
+        math_postcommit.save_handoff(root, result, previous)
+        raise
+    result.update(refresh={k: refreshed[k] for k in ('status', 'version', 'concept_count', 'record_count')},
+                  refresh_required=False)
     # Semantic corrections change the same read generation as formal intake.
     # Refresh their bounded discovery/record projections without a new event.
     try:
@@ -1080,11 +1238,14 @@ def finish_maintenance(repo_root, result, refresh_only=False, *, publish=False):
         result['retrieval_backend'] = math_memory_backends.refresh_selected(root, version=refreshed['version'])
     except (ImportError, OSError, ValueError, KeyError, sqlite3.Error) as exc:
         result['retrieval_backend'] = {'status':'pending','reason':type(exc).__name__}
+    math_postcommit.bind_handoff(root, result, refreshed['version'])
     if publish:
-        sys.path.insert(0, str(root/'数学一回滚复习系统/scripts'))
-        import math_postcommit
-        result['publication'] = math_postcommit.request_publication(
-            subject='math', event_id=result['maintenance_id'], repo_root=root)
+        math_postcommit.save_handoff(root, result, previous)
+        try:
+            result['publication'] = math_postcommit.request_publication(subject='math', event_id=identity, repo_root=root)
+        except (OSError, ValueError, RuntimeError) as exc:
+            result['publication'] = {'status': 'PENDING', 'reason': type(exc).__name__}
+    math_postcommit.save_handoff(root, result, previous)
     return result
 
 
@@ -1121,6 +1282,7 @@ def _accept_updates(repo_root, payload, event_id):
     event_id=event['event_id']
     # Preparation is before the writer. Recheck cited bytes after that commit;
     # its own index refresh may legitimately have advanced the global version.
+    _claim_revision_targets(payload, prepared=True)
     prepared = prepare_updates(root, {**payload, 'basis_version':None})
     contributions = {}
     if prepared.get('batch_contributions') is not None:
@@ -1805,7 +1967,7 @@ def _formal_question_images(root, formal_id, card_path):
 
 
 def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_version=None, formal_id=None, source_id=None,
-            fallback_concepts=None):
+            fallback_concepts=None, *, compact_teaching=False, teaching_methods=None):
     import math_concept_index as native
     import math_problem_methods as methods
     import math_exam_profile as exam
@@ -1999,12 +2161,23 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
             base['selection_context'] = copy.deepcopy(exam.SELECTION_CONTEXT)
         scope=meta.get('scope_notes',{})
         base['scope_notes']={q:scope[q] for q in concepts if q in scope} if view!='protected' else {}
-        personal = None
+        personal = method = None
         if view != 'protected' and len(rows) == 1 and not recovery and not unknown and not ambiguous:
             row = rows[0]
             if row.get('status') == 'semantic_current' and row.get('short_summary') and row.get('next_check'):
                 personal = {key: row[key] for key in ('concept_key', 'concept_name', 'status', 'short_summary',
                                                      'next_check', 'personal_fields_withheld') if key in row}
+                if compact_teaching:
+                    method = exact_method if (exact_method or {}).get('current_concept_key') == row['concept_key'] else \
+                        row.get('problem_solving')
+        if teaching_methods is not None and view != 'protected' and not (recovery or unknown or ambiguous):
+            # Hand the outer budget compiler the verified core before this
+            # reader starts trimming provenance and larger method objects.
+            for row in rows:
+                if preview := _teaching_method_preview(row.get('problem_solving')):
+                    teaching_methods[row['concept_key']] = preview
+            if preview := _teaching_method_preview(exact_method):
+                teaching_methods[None] = preview
         total=0
         for value in rows:
             total+=1
@@ -2061,7 +2234,8 @@ def resolve(repo_root, concepts, view='protected', max_bytes=12000, known_versio
         elif all(row.get('object_role') in ('step_reference', 'conclusion_reference')
                  and row.get('reference_status') == 'stale' for row in base['records']):
             base['status'] = 'source_changed'
-        slim = _low_budget_personal(base, personal, frequency_brief, max_bytes)
+        slim = _low_budget_personal(base, personal, frequency_brief, max_bytes, compact_teaching=compact_teaching,
+                                    method=method)
         if slim is not None:
             return slim
         if len(canonical(base).encode())>max_bytes:
@@ -2148,8 +2322,11 @@ def main():
         try:
             result=finish_maintenance(args.repo,result,refresh_only=args.refresh_only,publish=args.publish)
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            import math_postcommit
+            handoff = math_postcommit.read_handoff(args.repo.resolve(), result['maintenance_id']) or {}
             print(canonical({**result, 'accept_status':result['status'], 'status':'local_refresh_pending',
-                             'reason':str(exc), 'retry_command':'resume-maintenance'}))
+                             'reason':str(exc), 'retry_command':'resume-maintenance',
+                             'maintenance_summary':handoff.get('maintenance_summary')}))
             return 1
     else:
         result=accept_updates(args.repo,json.loads(args.input.read_text()),args.event_id)

@@ -15,7 +15,7 @@ import re
 import sqlite3
 
 SCHEMA = 'math-memory-context-v1'
-CONTEXT_REVISION = '2026-11-16.evidence-bound-delivery'
+CONTEXT_REVISION = '2026-11-17.teaching-material-budget'
 KEY = re.compile(r'MATH-CONCEPT-[0-9a-f]{24}')
 PERSONAL = ('short_summary', 'overview', 'progress', 'next_check',
             'exam_brief', 'latest_date', 'first_date', 'timeline_count', 'explicit_observation_count')
@@ -142,10 +142,10 @@ def _registered_method_names(root, requested, view):
     return result
 
 
-def _all_exact_eligible_names(root, requested):
-    """A neutral SQL preflight lets ordinary exact calls keep one reader call."""
+def _exact_named_points(root, requested):
+    """One neutral lookup, before any teaching profile is opened."""
     if not requested:
-        return False
+        return {}
     import math_concept_index as index
     import math_memory_catalog as catalog
     from math_learning_profiles import _read_only_uri
@@ -153,14 +153,17 @@ def _all_exact_eligible_names(root, requested):
         with closing(sqlite3.connect(_read_only_uri(root/index.INDEX),uri=True)) as conn:
             row=conn.execute("SELECT value FROM meta WHERE key='alias_problems'").fetchone()
             bad={index.normalize(item.get('alias','')) for item in json.loads(row[0])} if row else set()
+            exact = {}
             for term in requested:
                 name=index.normalize(term)
-                found=list(conn.execute('SELECT c.key,c.label FROM lookup l JOIN concepts c ON c.key=l.key WHERE l.name=?',(name,)))
-                if name in bad or len({key for key,label in found})!=1 or not all(_eligible_point(label) and catalog.classify_title(label)['kind']=='concept' for key,label in found):
-                    return False
-        return True
+                found=set(conn.execute('SELECT c.key,c.label FROM lookup l JOIN concepts c ON c.key=l.key WHERE l.name=?',(name,)))
+                if name not in bad and len(found) == 1:
+                    key, label = next(iter(found))
+                    if catalog.classify_title(label)['kind']=='concept':
+                        exact[term] = key
+            return exact
     except (OSError,sqlite3.Error,ValueError,TypeError):
-        return False
+        return {}
 
 
 def _clear_unqualified(value, status, *, disambiguation=(), reason=None):
@@ -257,6 +260,15 @@ def _claim_context(root, keys, view, valid_at, known_at):
         import math_memory_lifecycle as lifecycle
         result = lifecycle.resolve_memory_claims(root, keys, valid_at=valid_at,
                                                  known_at=known_at, view=view)
+        retained = []
+        for claim in result['claims']:
+            if claim['basis'] == 'source_verified':
+                if claim.get('memory_status') in {'source_changed', 'retracted', 'conflicted'} or claim['status'] in {'retracted', 'superseded'}:
+                    result['reference_claims_unavailable'] = result.get('reference_claims_unavailable', 0) + 1
+                    continue
+                claim = {**claim, 'authority': 'source_verified_reference', 'personal_evidence_eligible': False}
+            retained.append(claim)
+        result['claims'] = retained
         if view == 'after_attempt':
             from math_learning_profiles import ANSWER_MARKER
             visible = []
@@ -472,7 +484,149 @@ def _levels(native, view):
     return levels
 
 
-def _bound(value, max_bytes):
+def _pack_current_claims(value, max_bytes, identity_args):
+    context = value['memory_context']
+    layer = context['personal_judgments']
+    claims = layer['claims']
+    args = ['resolve', '--for-teaching', '--view', value['view'], *identity_args]
+    layer.update(claims=[], claims_omitted=len(claims), omitted_claims=[],
+                 omitted_claim_refs_unlisted=len(claims), claim_readback={'base_args': args,
+                     'concept_keys': sorted({claim['concept_key'] for claim in claims}), 'selector': '--claim-id'})
+
+    # Try whole active judgments before candidates and retired variants. An
+    # oversized first judgment must not prevent the next eligible one fitting.
+    if len(canonical(value).encode()) > max_bytes:
+        # At the native boundary there may be no room for even the readback
+        # notice. Return it explicitly instead of a misleading available body.
+        value = {key: value[key] for key in ('view', 'source_version', 'version', 'required_min_bytes',
+                                             'material_readback', 'omitted_method_ids') if key in value}
+        value.update(status='budget_too_small', records=[], memory_context={
+            'schema': SCHEMA, 'status': 'budget_too_small', 'required_full_bytes': context['required_full_bytes'],
+            'personal_judgments': {key: layer[key] for key in ('claims', 'claims_omitted', 'omitted_claims',
+                                       'omitted_claim_refs_unlisted', 'claim_readback')}})
+        layer = value['memory_context']['personal_judgments']
+        needed = len(canonical(value).encode())
+        if needed > max_bytes:
+            return {'status': 'budget_too_small', 'required_min_bytes': needed}
+
+    retained = set()
+    for position in sorted(range(len(claims)), key=lambda i: (claims[i].get('personal_evidence_eligible') is False
+                                                              or claims[i]['status'] != 'active',
+                                                              len(canonical(claims[i]).encode()))):
+        layer['claims'].append(claims[position])
+        if len(canonical(value).encode()) <= max_bytes:
+            retained.add(position)
+        else:
+            layer['claims'].pop()
+    layer['claims'] = [claims[i] for i in sorted(retained)]
+    layer['claims_omitted'] = layer['omitted_claim_refs_unlisted'] = len(claims) - len(retained)
+    for position, claim in enumerate(claims):
+        if position in retained:
+            continue
+        layer['omitted_claims'].append({key: claim[key] for key in ('concept_key', 'claim_id')})
+        if len(canonical(value).encode()) <= max_bytes:
+            layer['omitted_claim_refs_unlisted'] -= 1
+        else:
+            layer['omitted_claims'].pop()
+    if not layer['omitted_claim_refs_unlisted']:
+        layer.pop('omitted_claim_refs_unlisted')
+    return value
+
+
+def _combined_teaching_budget(value, previews, max_bytes, identity_args, keys, query, operation):
+    """Use a fixed core when the native material tier competes with judgments."""
+    context = value['memory_context']
+    judgment = context['personal_judgments']
+    identity = value.get('identity') or {}
+    compact_identity = {k: identity[k] for k in ('kind', 'formal_id', 'source_question_id') if k in identity}
+    core = {k: value[k] for k in ('status', 'view', 'version', 'source_version') if k in value}
+    core.update(identity=compact_identity or None, records=[], memory_context={
+        'schema': SCHEMA, 'status': 'compact', 'personal_judgments': {k: judgment[k] for k in
+            ('status', 'claims', 'claim_source_view', 'claims_withheld', 'reference_claims_unavailable', 'conflicts', 'history_gaps', 'missing',
+             'invalidated_concept_keys', 'affected_observation_count')
+            if k == 'status' or judgment.get(k)}})
+    slots = []
+    top = previews.get(None)
+    if top and top.get('current_concept_key') in keys:
+        slots.append((core, top, value.get('problem_solving')))
+    for row in value['records']:
+        lean = {k: row[k] for k in ('concept_key', 'concept_name', 'status', 'personal_fields_withheld') if k in row}
+        core['records'].append(lean)
+        if (preview := previews.get(row.get('concept_key'))) and row['concept_key'] in keys:
+            slots.append((lean, preview, row.get('problem_solving')))
+    if not slots:
+        return None
+
+    def size():
+        return len(canonical(core).encode())
+
+    def intact(preview, original):
+        originals = {route['method_id']: route for route in (original or {}).get('routes', [])}
+        for route in preview['routes']:
+            current = originals.get(route['method_id'], {})
+            if any(current.get(k) != route[k] for k in ('first_action', 'conditions')):
+                return False
+            if not all(any(all(r.get(k) == v for k, v in ref.items()) for r in current.get('source_refs', []))
+                       for ref in route['source_refs']):
+                return False
+        return True
+
+    # Keep the rich view when it already fits and carries every required atom.
+    if len(canonical(value).encode()) <= max_bytes and all(
+            intact(preview, original) for _, preview, original in slots):
+        return value
+    for owner, preview, _ in slots:
+        owner['problem_solving'] = preview
+    required = size()
+    if required > max_bytes:
+        args = ['resolve', '--for-teaching', '--view', value['view'], *identity_args]
+        args.extend(flag for key in keys for flag in ('--concept', key))
+        args.extend(part for flag, text in (('--query', query), ('--operation', operation))
+                    if text for part in (flag, text))
+        core.update(material_status='budget_omitted', required_min_bytes=required,
+                    material_readback={'args': [*args, '--max-bytes', str(required)]},
+                    omitted_method_ids=sorted({route['method_id'] for _, p, _ in slots for route in p['routes']}))
+        for owner, _, _ in slots:
+            owner.pop('problem_solving')
+        if size() > max_bytes:
+            core['memory_context']['required_full_bytes'] = required
+            return _pack_current_claims(core, max_bytes, identity_args)
+        delivered = set()
+        for owner, preview, _ in slots:
+            slim = {**preview, 'routes': []}
+            owner['problem_solving'] = slim
+            for route in preview['routes']:
+                slim['routes'].append(route)
+                if size() <= max_bytes:
+                    delivered.add(route['method_id'])
+                else:
+                    slim['routes'].pop()
+            if not slim['routes']:
+                owner.pop('problem_solving')
+        core['omitted_method_ids'] = [mid for mid in core['omitted_method_ids'] if mid not in delivered]
+        return core
+
+    # Optional navigation and personal context can use the remainder, but they
+    # cannot change the exact size needed to recover the core on the next read.
+    for slim, row in zip(core['records'], value['records']):
+        summary = {k: row[k] for k in ('short_summary', 'next_check') if k in row}
+        slim.update(summary)
+        if size() > max_bytes:
+            for k in summary:
+                slim.pop(k)
+    for key in ('exam_frequency', 'choice_fill_guidance'):
+        if value.get(key):
+            core[key] = value[key]
+            if size() > max_bytes:
+                core.pop(key)
+    if identity:
+        core['identity'] = identity
+        if size() > max_bytes:
+            core['identity'] = compact_identity or None
+    return core
+
+
+def _bound(value, max_bytes, *, claim_readback_args=None):
     """Omit whole optional evidence atoms, never conditions or formula fragments."""
     size = len(canonical(value).encode())
     if size <= max_bytes:
@@ -508,7 +662,7 @@ def _bound(value, max_bytes):
     lifecycle = context.get('personal_judgments', {})
     compact['personal_judgments'] = {k: lifecycle[k] for k in
         ('status', 'claims', 'conflicts', 'missing', 'history_gaps', 'invalidated_concept_keys',
-         'affected_observation_count', 'claim_source_view', 'claims_withheld')
+         'affected_observation_count', 'claim_source_view', 'claims_withheld', 'reference_claims_unavailable')
         if k in lifecycle and (k == 'status' or lifecycle[k])}
     pending = context.get('pending_evidence', {})
     compact['pending_evidence'] = {k: pending[k] for k in
@@ -534,6 +688,14 @@ def _bound(value, max_bytes):
     value['memory_context'] = context = compact
     if len(canonical(value).encode()) <= max_bytes:
         return value
+    if claim_readback_args is not None and value.get('selection_context'):
+        from math_exam_profile import SELECTION_CONTEXT
+        if value['selection_context'] == SELECTION_CONTEXT:
+            # This is the fixed teaching policy, not the selected method,
+            # applicability conditions, exam-frequency data, or learner evidence.
+            value['selection_context'] = {'current_attempt_status': SELECTION_CONTEXT['current_attempt_status']}
+            if len(canonical(value).encode()) <= max_bytes:
+                return value
     context['required_full_bytes'] = size
     personal = context.get('personal_records', {})
     while personal.get('records') and len(canonical(value).encode()) > max_bytes:
@@ -546,6 +708,10 @@ def _bound(value, max_bytes):
         pending['omitted_turns'] = pending.get('omitted_turns', 0) + len(removed.get('user_turns', []))
         pending['omitted_records'] = pending.get('omitted_records', 0) + 1
     lifecycle = context.get('personal_judgments', {})
+    if claim_readback_args is not None and lifecycle.get('claims'):
+        if len(canonical(value).encode()) <= max_bytes:
+            return value
+        return _pack_current_claims(value, max_bytes, claim_readback_args)
     for field in ('claims', 'conflicts'):
         while lifecycle.get(field) and len(canonical(value).encode()) > max_bytes:
             lifecycle[field].pop()
@@ -604,7 +770,7 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
             pending_hint_sequences=None, pending_spans=None, pending_whole_capture=False,
             backend_config=None, structured_math=False, confirmed_concept=None,
             selection_receipt=None, selection_basis=None, selection_abstain=None,
-            point_records=False):
+            point_records=False, teaching_scope=False):
     import math_concept_index as index
     import math_learning_profiles as profiles
     if view not in ('protected', 'after_attempt', 'direct'):
@@ -650,7 +816,7 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
             backend_config=backend_config,include_pending=include_pending,pending_capture_id=pending_capture_id,
             pending_sequences=pending_sequences,pending_hint_sequences=pending_hint_sequences,
             pending_spans=pending_spans,pending_whole_capture=pending_whole_capture,
-            point_records=point_records)
+            point_records=point_records,teaching_scope=teaching_scope)
         selected['scope_selection']={'status':'source_identity_selected_by_current_assistant',
             'concept_key':confirmed_concept,'query':query,'basis':selection_basis,
             'source_version':proof['source_version'],'not_a_mastery_assessment':True,
@@ -721,17 +887,29 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
     record_scoped = bool(scope.get('personal_requested') and
                          (scope.get('exact_identity') or scope.get('dates') or scope.get('date_gap') or valid_at or known_at
                           or source_first_request))
+    ordinary_teaching = teaching_scope and not (intent.get('history_search') or record_scoped
+                                                 or valid_at or known_at or point_records)
     source_lookup=({'status':'not_requested','selection_status':'not_requested','records':[]}
                    if point_records else _utterance_lookup(root,scope_query,scope,view,valid_at,known_at))
+    method_previews = {}
 
     def read(selected, read_view=None):
         if not (root / index.INDEX).is_file():
             return {'status': 'stale', 'reason': 'prepared_index_missing', 'records': [], 'view': view}
         try:
             actual_view=read_view or ('protected' if record_scoped else view)
+            options = {'compact_teaching': True} if ordinary_teaching and actual_view != 'protected' else {}
+            preview = {}
+            if options and not include_pending:
+                options['teaching_methods'] = preview
             value = profiles.resolve(root, selected, actual_view,
                                      max(native_budget,32000) if point_records else native_budget, None, formal_id, source_id,
-                                     fallback_concepts=fallback_concepts)
+                                     fallback_concepts=fallback_concepts, **options)
+            binding_version = scope.get('source_version') if ordinary_teaching else None
+            if binding_version and value.get('source_version') and value['source_version'] != binding_version:
+                return {'status': 'stale', 'reason': 'question_scope_snapshot_changed', 'records': [], 'view': view}
+            if preview and value.get('source_version'):
+                method_previews[value['source_version']] = preview
             if point_records and actual_view!='protected':
                 needed=value.get('required_min_bytes',0)
                 if value.get('status')=='budget_too_small' and 32000<needed<=128000:
@@ -748,9 +926,17 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
             return {'status': 'stale', 'reason': 'prepared_index_unavailable',
                     'error_type': type(exc).__name__, 'records': [], 'view': view}
 
+    named = _exact_named_points(root, requested)
+    if ordinary_teaching and scope.get('exact_identity') and named:
+        allowed = set(scope.get('concept_keys') or [])
+        if set(named.values()) - allowed:
+            return {'status': 'question_point_mismatch', 'view': view, 'records': [],
+                    'identity': {'kind': 'formal_card', 'formal_id': formal_id},
+                    'resolution': {'status': 'question_point_mismatch', 'current_point_confirmed': False,
+                                   'requires_scope_check': True}}
     # Discover identity using neutral prepared rows; a weak name match must not
     # open private history first and only be discarded after a failed rank.
-    precise_input = _all_exact_eligible_names(root,requested)
+    precise_input = bool(requested) and len(named) == len(set(requested))
     route_reconsider = bool(query and intent.get('current_constraint_active'))
     if intent.get('historical_statement'):
         route_reconsider=True
@@ -764,7 +950,11 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
     if unclassified:
         record_scoped = True
     weak_keys = _mark_native_candidates(discovery)
-    exact = _exact_requested_keys(root, requested, discovery)
+    if precise_input:
+        eligible = set(named.values()) - weak_keys
+        exact = [row['concept_key'] for row in discovery.get('records', []) if row.get('concept_key') in eligible]
+    else:
+        exact = _exact_requested_keys(root, requested, discovery)
     kinds=_catalog_kinds(root,exact)
     parent_keys=[key for key in exact if kinds.get(key)=='parent']
     if not requested and scope.get('exact_identity') and len(discovery.get('records',[]))==1 and not weak_keys:
@@ -814,7 +1004,10 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
     else:
         blocked = discovery.get('status') in ('stale', 'ambiguous_identity', 'identity_conflict',
                                                'unknown_formal_id', 'budget_too_small')
-        if natural and not blocked and not rejected and not unknown_identity:
+        if natural and not blocked and not rejected and not unknown_identity and ordinary_teaching:
+            native = _clear_unqualified(discovery, 'no_match', reason='confirmed_math_scope_required')
+            retrieval['selection_status'] = 'requires_confirmation'
+        elif natural and not blocked and not rejected and not unknown_identity:
             try:
                 import math_memory_backends
                 discovered = math_memory_backends.candidate_query(root,
@@ -1076,7 +1269,7 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
         native['personal_context_scope'] = 'requested_knowledge_point_not_source_attempt_history'
     query_version = digest([SCHEMA, CONTEXT_REVISION, native.get('version'), native.get('source_version'),
         original_concepts, formal_id, source_id, query, search_query, query_origin, operation, view, valid_at, known_at,
-        include_pending, structured_math, point_records, pending_capture_id, pending_sequences, pending_hint_sequences,
+        include_pending, structured_math, point_records, teaching_scope, pending_capture_id, pending_sequences, pending_hint_sequences,
         pending_spans, pending_whole_capture, config_identity, max_bytes, lifecycle, pending, retrieval, historical,
         scope, personal_records,source_lookup])
     native.update(version=query_version, memory_context=context)
@@ -1087,7 +1280,16 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
                 and pending.get('status') not in ('stale', 'unavailable')
                 and historical.get('status') not in ('stale', 'unavailable')
                 and not invalidated)
-    delivered = _bound(native, max_bytes)
+    claim_readback_args = None
+    if ordinary_teaching and view != 'protected' and lifecycle.get('claims'):
+        claim_readback_args = [arg for flag, identity in (('--formal-id', formal_id), ('--source-question-id', source_id))
+                               if identity for arg in (flag, identity)]
+    delivered = None
+    previews = method_previews.get(native.get('source_version'))
+    if claim_readback_args is not None and previews and native.get('status') == 'available':
+        delivered = _combined_teaching_budget(native, previews, max_bytes, claim_readback_args, keys, query, operation)
+    if delivered is None:
+        delivered = _bound(native, max_bytes, claim_readback_args=claim_readback_args)
     if known_version == query_version and reusable:
         from math_teaching_delivery import has_delivery_gap
         if not has_delivery_gap(delivered):
@@ -1095,3 +1297,41 @@ def resolve(repo_root, concepts=None, view='protected', max_bytes=12000, *,
                     'view': view, 'identity': delivered.get('identity'), 'records': [],
                     'memory_context': {'schema': SCHEMA, 'status': 'unchanged'}}
     return delivered
+
+
+def resolve_claim(repo_root, concept_key, claim_id, view, max_bytes, *, formal_id=None, source_id=None):
+    """Read one visible judgment or list identities for one exact point."""
+    from math_memory_lifecycle import IDENTITY
+    if not KEY.fullmatch(concept_key) or (claim_id and not IDENTITY.fullmatch(claim_id)):
+        raise ValueError('exact_claim_requires_stable_concept_and_claim_id')
+    if max_bytes < 64:
+        raise ValueError('invalid_context_budget')
+    layer = {'status': 'protected', 'claims': []}
+    value = {'status': 'protected', 'view': view, 'records': [],
+             'memory_context': {'personal_judgments': layer}}
+    if view != 'protected':
+        # Reuse the normal question binding and point eligibility without
+        # hydrating any narrative, method, or neighboring personal history.
+        scope = resolve(repo_root, [concept_key], 'protected', max(4500, max_bytes),
+                        formal_id=formal_id, source_id=source_id, teaching_scope=True)
+        for name in ('source_version', 'identity'):
+            if scope.get(name) is not None:
+                value[name] = scope[name]
+        if scope.get('status') == 'available' and any(
+                row.get('concept_key') == concept_key and row.get('personal_evidence_eligible') is not False
+                for row in scope.get('records', [])):
+            visible = _claim_context(Path(repo_root).resolve(), [concept_key], view, None, None)
+            if claim_id:
+                layer['claims'] = [claim for claim in visible['claims'] if claim['claim_id'] == claim_id]
+                status = 'available' if layer['claims'] else 'not_available_in_view'
+                if layer['claims'] and 'claim_source_view' in visible:
+                    layer['claim_source_view'] = visible['claim_source_view']
+            else:
+                layer['claim_ids'] = [claim['claim_id'] for claim in visible['claims']]
+                status = 'available'
+            layer['status'] = value['status'] = 'unavailable' if visible['status'] == 'unavailable' else status
+        else:
+            status = scope.get('status')
+            value['status'] = layer['status'] = 'point_scope_required' if status == 'available' else status
+    needed = len(canonical(value).encode())
+    return value if needed <= max_bytes else {'status': 'budget_too_small', 'required_min_bytes': needed}

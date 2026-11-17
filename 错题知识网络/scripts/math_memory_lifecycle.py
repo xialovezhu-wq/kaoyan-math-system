@@ -91,7 +91,7 @@ def claim_hash(claim):
                                 'recorded_at', 'profile_revision'}})
 
 
-def _source_refs(root, refs, *, user_quote=False):
+def _source_refs(root, refs, *, user_quote=False, native_user=False):
     import math_learning_profiles as profiles
     if not isinstance(refs, list) or not refs or len(refs) > 16:
         raise ValueError('memory_evidence_required')
@@ -106,7 +106,8 @@ def _source_refs(root, refs, *, user_quote=False):
             source = json.loads((Path(root) / ref['path']).read_text())
             if not profiles._role_quote_matches(source, ref, ref['role']):
                 raise ValueError('memory_quote_or_role_mismatch')
-            has_user |= ref['role'] == 'user'
+            has_user |= (ref['role'] == 'user' and (not native_user or
+                         profiles._recorded_role_quote(Path(root).resolve(), ref, 'user')))
     if user_quote and not has_user:
         raise ValueError('memory_correction_user_quote_required')
     return copy.deepcopy(checked)
@@ -146,21 +147,56 @@ def _indexed_observations(root, keys):
     return result
 
 
+def _check_claim_revision_scope(row, previous, claims):
+    targets = row.get('claim_revision_targets', {})
+    if (not isinstance(targets, dict) or len(targets) > 64
+            or any(not isinstance(cid, str) or not IDENTITY.fullmatch(cid)
+                   or not isinstance(sha, str) or not HEX.fullmatch(sha)
+                   for cid, sha in targets.items())):
+        raise ValueError('memory_claim_revision_targets_invalid')
+
+    current = {claim['claim_id']: claim for claim in claims}
+    removed = previous.keys() - current.keys()
+    affected = set(removed)
+    for cid, claim in current.items():
+        if previous.get(cid) == claim:
+            continue
+        if cid in previous:
+            affected.add(cid)
+        # A new or revised edge can change a predecessor while its row is identical.
+        if claim['basis'] != 'assistant_inferred' and claim['status'] in {'active', 'conflicted'}:
+            affected.update(claim.get('conflicts_with', []))
+            if claim['status'] == 'active':
+                affected.update(claim.get('supersedes', []))
+    if affected and not str(row.get('claims_revision_reason', '')).strip():
+        raise ValueError('memory_claims_revision_reason_required')
+    unauthorized = {cid for cid in affected if targets.get(cid) != claim_hash(previous[cid])}
+    if unauthorized:
+        raise ValueError('memory_claim_revision_scope_violation:'+','.join(sorted(unauthorized)))
+
+    # Withdrawal of a live claim uses the native exact correction and leaves
+    # its row available to the effective-time reader. Prune only retired rows.
+    cutoff = datetime.now(timezone.utc)
+    for cid in sorted(removed):
+        claim = previous[cid]
+        end = _moment(claim.get('valid_to'))
+        if claim['status'] not in {'retracted', 'superseded'} and (end is None or end > cutoff):
+            raise ValueError('memory_claim_removal_requires_retirement:'+cid)
+
+
 def prepare_claims(root, row):
-    """Validate an optional full current claim set, retaining omitted old claims."""
+    """Keep implicit claims and validate the scope of explicit revisions."""
     row = copy.deepcopy(row)
     path = Path(root)/SEMANTIC/(row['concept_key']+'.json')
     old = _safe_json(root, path) if path.is_file() else {}
     previous = old.get('claims', [])
-    if 'claims' not in row:
-        if previous:
-            row['claims'] = copy.deepcopy(previous)
+    if 'claims' not in row and not previous and 'claim_revision_targets' not in row:
         return row
-    values = row['claims']
+    values = row.get('claims', previous)
     if not isinstance(values, list) or len(values) > 64:
         raise ValueError('memory_claims_must_be_bounded_array')
     observations = _indexed_observations(root, [row['concept_key']])
-    known_observations = {(v['event_id'], v['observation_sha256']) for v in observations}
+    known_observations = {(v['event_id'], v['observation_sha256']): v for v in observations}
     known_claims = {c['claim_id']: c for c in previous}
     seen, prepared = set(), []
     required = {'claim_id', 'content', 'scope', 'basis', 'status', 'source_refs', 'observation_refs'}
@@ -187,8 +223,15 @@ def prepare_claims(root, row):
                 raise ValueError('memory_exact_observation_reference_required')
             if (ref['event_id'], ref['observation_sha256']) not in known_observations:
                 raise ValueError('memory_observation_binding_not_in_concept')
-        if value['basis'] in {'user_observed', 'user_confirmed', 'self_reported'} and not bindings:
-            _source_refs(root, refs, user_quote=True)
+        if value['basis'] in {'user_observed', 'user_confirmed', 'self_reported'}:
+            new = value != known_claims.get(cid)
+            if not bindings:
+                _source_refs(root, refs, user_quote=True, native_user=new)
+            elif new:
+                observed_sources = {r['sha256'] for ref in bindings for r in known_observations[
+                    (ref['event_id'], ref['observation_sha256'])]['source_refs']}
+                if not observed_sources.intersection(r['sha256'] for r in refs):
+                    raise ValueError('memory_claim_requires_native_observation_source')
         start, stop = _moment(value.get('valid_from')), _moment(value.get('valid_to'))
         if start and stop and stop <= start:
             raise ValueError('memory_claim_time_range_invalid')
@@ -201,10 +244,7 @@ def prepare_claims(root, row):
                 if predecessor == cid or predecessor not in known_claims:
                     raise ValueError('memory_claim_predecessor_unknown')
         prepared.append({**value, 'source_refs': refs})
-    removed = set(known_claims)-seen
-    changed = {c['claim_id'] for c in prepared if c['claim_id'] in known_claims and c != known_claims[c['claim_id']]}
-    if (removed or changed) and not str(row.get('claims_revision_reason', '')).strip():
-        raise ValueError('memory_claims_revision_reason_required')
+    _check_claim_revision_scope(row, known_claims, prepared)
     row['claims'] = prepared
     refs = row['source_refs']
     present = {(r['path'], r['sha256']) for r in refs}
@@ -315,7 +355,7 @@ def prepare_corrections(root, payload, known_concepts):
         _moment(value['effective_at'])
         if value['effective_at'] is None:
             raise ValueError('memory_correction_effective_time_required')
-        refs = _source_refs(root, value['source_refs'], user_quote=True)
+        refs = _source_refs(root, value['source_refs'], user_quote=True, native_user=cid not in ids)
         target = value['target']
         target_evidence = None
         if value['target_kind'] == 'observation':

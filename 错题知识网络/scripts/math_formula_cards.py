@@ -908,6 +908,43 @@ def _artifacts(path):
     return refs
 
 
+def _read_release_entry(root, version, identity, row):
+    raw = read_bytes(_entry_path(root, version, identity), 256_000)
+    if sha(raw) != row["sha256"]:
+        raise CardError("staged_formula_entry_changed:" + identity)
+    entry = json.loads(raw)
+    if (entry.get("card_id") != identity or entry.get("generation") != version
+            or entry.get("status") != row["status"] or entry.get("object") != row.get("object")):
+        raise CardError("staged_formula_entry_binding_changed:" + identity)
+    return entry
+
+
+def _verify_release_assets(root, release):
+    version = release["version"]
+    directory = _where(root, version)
+    for identity, row in release["rows"].items():
+        entry = _read_release_entry(root, version, identity, row)
+        if row["status"] == "ready":
+            actual = _artifacts(_object_path(root, entry["object"]))
+            if actual != entry["artifacts"]:
+                raise CardError("staged_formula_artifacts_changed:" + identity)
+
+    for identity, row in release["diagram_projection"].items():
+        if row.get("scope", {}).get("type") != "exact_formal_question" or row["status"] != "ready":
+            continue
+        if not recap.ID.fullmatch(identity) or not recap.SHA.fullmatch(row["object"]):
+            raise CardError("invalid_guarded_diagram_identity")
+        if read(directory / "diagrams" / (identity + ".json"), 128_000) != row:
+            raise CardError("staged_guarded_diagram_receipt_changed:" + identity)
+        for name in ("index.html", "diagram.svg", "diagram.json"):
+            if sha(read_bytes(root / STORE / "guarded" / row["object"] / name)) != row["artifacts"][name]:
+                raise CardError("staged_guarded_diagram_changed:" + identity)
+
+    for name in ("index.md", "index.html"):
+        if sha(read_bytes(directory / name)) != release["navigation_hashes"][name]:
+            raise CardError("formula_navigation_changed")
+
+
 def _catalog_pages(rows, root, release, preview):
     def location(stub, filename):
         local = os.path.relpath(_object_path(root, stub["object"]) / filename, release)
@@ -985,7 +1022,14 @@ def _build(root, *, only=None):
         path = _object_path(root, oid)
         try:
             artifacts = _artifacts(path)
-        except (OSError, ValueError, TypeError):
+            old_row = previous["rows"].get(identity)
+            if old_row and old_row["status"] == "ready" and old_row["object"] == oid:
+                old_entry = _read_release_entry(root, previous["version"], identity, old_row)
+                if artifacts != old_entry["artifacts"]:
+                    # A copied object and its sidecar may agree with each other
+                    # while disagreeing with the published entry.
+                    artifacts = None
+        except (OSError, ValueError, KeyError, TypeError):
             artifacts = None
         fields = [] if artifacts else list(_math_fields(card, diagram))
         prepare[identity] = (card, diagram, specific, oid, artifacts, fields)
@@ -1128,6 +1172,9 @@ def _install_bindings(root, generation, release):
 def _release_pointer(root, release, *, note, covered_formal_basis=None):
     version = release["version"]
     raw = read_bytes(_where(root, version) / "release.json")
+    if json.loads(raw) != release:
+        raise CardError("formula_release_manifest_changed")
+    _verify_release_assets(root, release)
     paths = {k: (_where(root, version) / k).relative_to(root).as_posix() for k in ("index.html", "index.md")}
     bindings = _install_bindings(root, version, release)
     if (covered_formal_basis is not None
@@ -1136,9 +1183,6 @@ def _release_pointer(root, release, *, note, covered_formal_basis=None):
     dependency_state = freshness(root, release["dependencies"])
     if dependency_state["status"] != "current":
         raise CardError("staged_formula_dependencies_drift:" + dependency_state["status"])
-    for name, expected in release["navigation_hashes"].items():
-        if sha(read_bytes(_where(root, version) / name)) != expected:
-            raise CardError("formula_navigation_changed")
     value = {"schema": POINTER, "version": version, "manifest_sha256": sha(raw), "published_at": now(),
              "native_bindings": bindings, "catalog_guards": release["catalog_guards"], "pages": paths,
              "guarded_diagram_ids": {
@@ -1167,20 +1211,6 @@ def _publish(root, version, *, rollback=False, previous_version=None, covered_fo
     if (not rollback and not disabled and (before or {}).get("version") != version
             and (before or {}).get("version") != release["base_pointer"]):
         raise CardError("formula_pointer_changed_since_staging")
-    # Validate the immutable assets for this exact release once before activate.
-    for identity, row in release["rows"].items():
-        if sha(read_bytes(_entry_path(root, version, identity), 256_000)) != row["sha256"]:
-            raise CardError("staged_formula_entry_changed:" + identity)
-        if row["status"] == "ready":
-            _artifacts(_object_path(root, row["object"]))
-    for identity, row in release["diagram_projection"].items():
-        if row.get("scope", {}).get("type") != "exact_formal_question" or row["status"] != "ready":
-            continue
-        if not recap.SHA.fullmatch(row["object"]):
-            raise CardError("invalid_guarded_diagram_identity")
-        for name in ("index.html", "diagram.svg", "diagram.json"):
-            if sha(read_bytes(root / STORE / "guarded" / row["object"] / name)) != row["artifacts"][name]:
-                raise CardError("staged_guarded_diagram_changed:" + identity)
     if not release["summary"]["ready"]:
         raise CardError("no_valid_formula_cards")
     basis = None if rollback else (covered_formal_basis or release.get("covered_formal_basis"))
@@ -1264,10 +1294,17 @@ def refresh(repo_root):
             state = freshness(root, published["dependencies"])
             if (state["status"] == "current" and not published["summary"]["failed"]
                     and (p.get("native_bindings") or {}).get("bound_profile_version") == native_version):
-                older = published["summary"]
-                return {**older, "status": "READY" if not older["failed"] else "PENDING",
-                        "version": p["version"], "manifest_sha256": p["manifest_sha256"],
-                        "reused": older["ready"], "first_built": 0, "rebuilt": 0, "freshness": "current"}
+                try:
+                    _verify_release_assets(root, published)
+                except (OSError, ValueError, KeyError, TypeError):
+                    # The sources certify what to render. They do not certify
+                    # that the generated files survived a copy or cleanup.
+                    pass
+                else:
+                    older = published["summary"]
+                    return {**older, "status": "READY", "version": p["version"],
+                            "manifest_sha256": p["manifest_sha256"], "reused": older["ready"],
+                            "first_built": 0, "rebuilt": 0, "freshness": "current"}
         built = _build(root)
         if built["failed"]:
             return {**built, "status": "PENDING", "reason": "formula_asset_write_failed"}

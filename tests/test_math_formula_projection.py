@@ -3,6 +3,7 @@
 from pathlib import Path
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -72,6 +73,52 @@ class FormulaProjectionTest(unittest.TestCase):
         self.source.unlink()
         with self.assertRaisesRegex(cards.CardError, "dependencies_drift:unresolved"):
             cards._publish(self.root, staged["version"])
+        self.assertIsNone(cards.pointer(self.root))
+
+    def test_formula_only_rebuilds_missing_or_drifted_html(self):
+        published = cards.refresh(self.root)
+        identity = "MRC-test-branch"
+        ref = cards.lookup(self.root, identity, view="direct")
+        html = self.root / ref["card_path"]
+        original = html.read_bytes()
+        for damage in ("missing", "sidecar_matches_other_html"):
+            with self.subTest(damage=damage):
+                if damage == "missing":
+                    html.unlink()
+                else:
+                    modified = original + b"<!-- different local build -->"
+                    html.write_bytes(modified)
+                    sidecar = html.parent / "artifacts.json"
+                    hashes = cards.read(sidecar)
+                    hashes["index.html"] = cards.sha(modified)
+                    cards.write(sidecar, hashes)
+                self.assertEqual("projection_pending", cards.lookup(self.root, identity, view="direct")["status"])
+
+                command = ROOT / "数学一回滚复习系统/scripts/math_postcommit.py"
+                result = subprocess.run(
+                    [sys.executable, str(command), "--repo", str(self.root), "--formula-only"],
+                    check=True, capture_output=True, text=True,
+                )
+                recovery = json.loads(result.stdout)
+                self.assertEqual("READY", recovery["status"])
+                self.assertEqual(published["version"], recovery["version"])
+                self.assertEqual(1, recovery["rebuilt"])
+                self.assertEqual(original, html.read_bytes())
+                self.assertEqual("ready", cards.lookup(self.root, identity, view="direct")["status"])
+
+    def test_publish_rejects_artifacts_that_disagree_with_the_staged_entry(self):
+        version = cards._build(self.root)["version"]
+        identity = "MRC-test-branch"
+        stub = cards.read(cards._entry_path(self.root, version, identity))
+        obj = cards._object_path(self.root, stub["object"])
+        html = obj / "index.html"
+        different_html = html.read_bytes() + b"<!-- from another build -->"
+        html.write_bytes(different_html)
+        sidecar = {**stub["artifacts"], "index.html": cards.sha(different_html)}
+        cards.write(obj / "artifacts.json", sidecar)
+
+        with self.assertRaisesRegex(cards.CardError, "staged_formula_artifacts_changed:" + identity):
+            cards._publish(self.root, version)
         self.assertIsNone(cards.pointer(self.root))
 
 

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Source-bound exact geometry defining a checked projection",
+  "type": "object",
+  "required": ["schema", "objects", "assumption_refs", "directed_edges", "source_refs", "scope"],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,23}$"},
+    "rational": {"oneOf": [{"type": "integer"}, {"type": "string", "pattern": "^-?[0-9]+(/[1-9][0-9]*)?$"}]},
+    "xyz": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/rational"}}
+  },
+  "properties": {
+    "schema": {"const": "math-diagram-v1"},
+    "objects": {
+      "type": "object", "minProperties": 2, "maxProperties": 20,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {
+        "type": "object", "required": ["type"],
+        "properties": {
+          "type": {"enum": ["point", "vector", "plane"]},
+          "xyz": {"$ref": "#/$defs/xyz"},
+          "from": {"$ref": "#/$defs/id"},
+          "to": {"$ref": "#/$defs/id"},
+          "through": {"$ref": "#/$defs/id"},
+          "basis": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/id"}},
+          "extent": {"$ref": "#/$defs/rational"}
+        },
+        "allOf": [
+          {"if": {"properties": {"type": {"const": "point"}}}, "then": {"required": ["xyz"]}},
+          {"if": {"properties": {"type": {"const": "vector"}}}, "then": {"required": ["from", "to"]}},
+          {"if": {"properties": {"type": {"const": "plane"}}}, "then": {"required": ["through", "basis"]}}
+        ]
+      }
+    },
+    "assumption_refs": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 0}},
+    "directed_edges": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["object_id"]}},
+    "projection": {
+      "type": "object",
+      "properties": {"view_directions": {"type": "array", "items": {"$ref": "#/$defs/xyz"}}}
+    },
+    "source_refs": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "required": ["path", "sha256"]}
+    },
+    "scope": {"type": "object", "required": ["type", "stage"]},
+    "construction_checks": {"type": "object"},
+    "conclusion_checks": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["status", "relation"],
+        "properties": {
+          "status": {"enum": ["derived", "configuration_verified", "symbolic_under_construction",
+            "symbolic_excluding_degeneracies", "not_general", "unknown"]}
+        }
+      }
+    },
+    "visual_checks": {"type": "object"}
+  }
+}

@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -100,6 +101,32 @@ def refresh_formal_epoch(root: Path) -> None:
         math_learning_state.atomic_write(root, path, data)
 
 
+def resume_formula_only(root: Path, event_id: str | None = None) -> dict[str, Any]:
+    import math_formula_cards
+    previous = None
+    if event_id:
+        find_committed_event(root, event_id)
+        path = root / "数学一回滚复习系统/正式提交后续" / (hashlib.sha256(event_id.encode()).hexdigest() + ".json")
+        if path.is_file():
+            previous = path.read_bytes()
+    result = math_formula_cards.refresh(root)
+    if previous is not None:
+        record = json.loads(previous)
+        if record.get("event_id") != event_id:
+            raise ValueError("formula_postcommit_receipt_identity_changed")
+        record["formula_projection"] = result
+        if result["status"] == "READY" and record.get("status") == "formula_projection_pending":
+            publication = record.get("publication", {}).get("status")
+            record["status"] = ("completed_local" if publication == "NOT_REQUESTED"
+                                else "completed" if publication == "PUBLISHED" else "local_updated_cloud_pending")
+        if path.read_bytes() != previous:
+            raise ValueError("formula_postcommit_receipt_changed_retry_readback")
+        math_learning_state.atomic_write(root, path, math_learning_state.canonical(record))
+        result = {**result, "postcommit_receipt_path": path.relative_to(root).as_posix()}
+    return {**result, "formal_replay_allowed": False}
+
+
+
 def run_after_commit(
     repo_root: Path | str,
     event_id: str,
@@ -124,6 +151,14 @@ def run_after_commit(
         concept_index = math_concept_index.build_index(root, affected_ids=identities)
         if concept_index.get("status") not in {"ready", "noop"}:
             raise ValueError("concept_index_not_ready")
+        if event.get("event_type") in {"closeout", "concept_review"}:
+            try:
+                import math_formula_cards
+                record["formula_projection"] = math_formula_cards.refresh(root)
+            except (ImportError, OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error,
+                    subprocess.SubprocessError) as exc:
+                record["formula_projection"] = {"status": "PENDING", "reason": str(exc),
+                                                "formal_replay_allowed": False}
         import math_concept_review
         record["concept_pages"] = math_concept_review.refresh_pages(root)
         # Keep the full inventory in the index, not in every score receipt.
@@ -148,7 +183,12 @@ def run_after_commit(
                     [event_id, identity["version"], identity["formal_version"], local.get("versions", {})])
                 record["publication_event_id"] = publication_event_id
                 record["personalization"] = identity
-                published = (requester or request_publication)(subject="math", event_id=publication_event_id, repo_root=root)
+                import math_formal_quality
+                if math_formal_quality.active(root):
+                    published = {"status": math_formal_quality.HOLD, "reason": "formal_quality_generation_pending"}
+                else:
+                    published = (requester or request_publication)(
+                        subject="math", event_id=publication_event_id, repo_root=root)
                 if not isinstance(published, dict) or not isinstance(published.get("status"), str):
                     raise ValueError("invalid_publication_result")
                 record["publication"] = published
@@ -160,6 +200,8 @@ def run_after_commit(
     local_ready = (record["local_refresh"]["status"] == "refreshed"
                    and record["concept_index"]["status"] in {"ready", "noop"})
     record["status"] = "completed" if status == "PUBLISHED" else "local_updated_cloud_pending" if local_ready else "local_refresh_pending"
+    if local_ready and record.get("formula_projection", {}).get("status") == "PENDING":
+        record["status"] = "formula_projection_pending"
     name = hashlib.sha256(event_id.encode()).hexdigest() + ".json"
     path = root / "数学一回滚复习系统/正式提交后续" / name
     math_learning_state.atomic_write(root, path, math_learning_state.canonical(record))
@@ -169,16 +211,28 @@ def run_after_commit(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=str(ROOT))
-    parser.add_argument("--event-id", required=True)
+    parser.add_argument("--event-id")
+    parser.add_argument("--formula-only", action="store_true",
+                        help="Resume only the local formula and geometry projection")
     parser.add_argument("--refresh-only", action="store_true")
     args = parser.parse_args()
+    if not args.formula_only and not args.event_id:
+        parser.error("--event-id is required unless --formula-only is selected")
     try:
-        value = run_after_commit(args.repo, args.event_id, refresh_only=args.refresh_only)
-    except (OSError, ValueError) as exc:
+        if args.formula_only:
+            value = resume_formula_only(Path(args.repo).resolve(), args.event_id)
+        else:
+            value = run_after_commit(args.repo, args.event_id, refresh_only=args.refresh_only)
+    except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as exc:
         print(json.dumps({"status": "unavailable", "reason": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(value, ensure_ascii=False))
-    return 0 if value["local_refresh"]["status"] == "refreshed" and value["concept_index"]["status"] in {"ready", "noop"} else 1
+    if args.formula_only:
+        return 0 if value["status"] in {"READY", "NOT_APPLICABLE"} else 1
+    local_ready = (value["local_refresh"]["status"] == "refreshed"
+                   and value["concept_index"]["status"] in {"ready", "noop"})
+    formula_ready = value.get("formula_projection", {}).get("status") != "PENDING"
+    return 0 if local_ready and formula_ready else 1
 
 
 if __name__ == "__main__":

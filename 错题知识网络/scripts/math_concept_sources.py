@@ -57,6 +57,19 @@ def _user_reference(conversation, cache, outcomes):
     return (first['text'] if first and 'wrong_rejected' not in outcomes else ''), meta
 
 
+def selected_turn_locators(turns):
+    """Keep role/sequence/hash locators from one validated capture, no raw copy."""
+    locators = [{"sequence": turn["sequence"], "role": turn["role"],
+                 "sha256": turn["source_text_sha256"]} for turn in turns]
+    ids = [row["sequence"] for row in locators]
+    if (any(type(i) is not int or i < 1 for i in ids) or ids != sorted(set(ids))
+            or any(row["role"] not in {"user", "assistant"}
+                   or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) for row in locators)):
+        raise ValueError("math_candidate_unordered_turn_evidence")
+    return locators
+
+
+
 def _json(path, default):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
 

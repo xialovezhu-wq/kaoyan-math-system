@@ -1575,6 +1575,21 @@ def related(args: argparse.Namespace) -> int:
                 continue
             reason = "；".join(reasons) if reasons else "弱文本或标签相似"
             print(f"- {score:.2f} {level} {card['id']} {card['meta'].get('title', '')}：{reason}")
+    if getattr(args, "quality_workspace", None):
+        import subprocess
+        command = [sys.executable, str(PROJECT_ROOT / "数学一回滚复习系统/scripts/math_formal_quality.py"),
+                   "verify-candidates", "--workspace", args.quality_workspace, "--formal-id", target["id"]]
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+            quality = json.loads(proc.stdout)
+            if proc.returncode or quality.get("status") != "VERIFIED_LIVE_RECEIPTS":
+                print("同题语义依据待核；现有相关题结果可继续使用。")
+                return 0
+            print("同题正式语义候选（仅复核依据）")
+            for row in quality["advisories"][:args.top]:
+                print(f"- {row['reference_id']} · {row['advisory']['relation']} · {row['origin']}")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            print("同题语义依据暂不可读；现有相关题结果可继续使用。")
     return 0
 
 
@@ -1724,6 +1739,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_related.add_argument("target", help="错题编号或错题卡路径")
     p_related.add_argument("--top", type=int, default=8)
     p_related.add_argument("--threshold", type=float, default=0.10)
+    p_related.add_argument("--quality-workspace", help="附加这个同题正式批次的已核语义回执，不写 related")
     p_related.add_argument(
         "--ignore-declared",
         action="store_true",

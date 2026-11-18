@@ -1,186 +1,35 @@
 ---
 name: kaoyan-math-warmup
-description: "数学晨间、学习前五题和到期旧题的选题与预处理。已准备队列直接逐题学习，复用 question-worker 快速讲解和 wrong-intake 完整 Capture；实时不评分或更新长期调度，正式处理留到晚间入库。保留原生语义选题、Day 0-7、独立正确排除、答案保护和精确交付身份。学习后按已完成正式ID筛题使用 daily-filter。"
+description: 数学次日备题或重选未开始的题单。按前日真实断点、适用条件与数一去重考频选题。
 ---
 
-# Kaoyan Math Warmup
+# 数学次日备题
 
-仅当收到恢复检查点、progress.overall_status为partial/blocked，或报告仍有未完成项时，先转kaoyan-math-web-recovery保全并续接；不要拒绝后结束。完整业务包附有complete进度报告时照常接收，不循环转回恢复Skill。补齐后回到本Skill，已完成的学习与正式提交不重放。
+以 Asia/Shanghai 的日期为准。目标题单日为 D，依据固定为 D 前一天真实快速入库的 Capture。10 月 15 日备题用 10 月 14 日快存，无论何时正式提交。用户要求更新规则时只更新流程；实际备题请求按下文完成。
 
-## Outcome
+## 先确认前一天的正式证据
 
-At study start, deliver up to the requested number of answer-protected formal old cards. Deterministic code decides eligibility and identity; a bounded native reader does the real semantic reading and value comparison; the owning parent reopens the same bytes and owns the final decision and the only serialized queue write.
+1. 按[本机路径](../kaoyan-math-question-worker/references/local-paths.md)定位数学项目。回放前一天的快存，核对 Capture、正式提交和现行个性化摘要。需要正式化时，实际备题按 [nightly-qa](../kaoyan-math-nightly-qa/SKILL.md) 处理该日精确集合，先验回已接受摘要，再选题。已办的提交不重放。只读预览不调用正式写者。正式入库若还处理其他工作日，其他日的内容不参与本次选题。
+2. 逐份读原题、小问、首答、提示顺序及同次补充。按数学对象、具体操作和适用条件归并证据，核对概念、基础公式、二级结论及解题步骤或步骤连接。错答、明确卡住或需要提示的动作才可立项。相同范围已有独立正确证据时排除该动作，另一条件或后续步骤有实证卡点时单列。未展示、题目标签或要求补全讲解本身不能证明不熟。
+3. 先定真实卡点，再从同版考频为每个动作核一项适用的主题和对应题数。数一 2005–2025 年去重考次在先，同次数看 2016–2025 年，任一窗口达到高频才进入必覆盖。考纲父子栏目、共享前置和已经独立做对的公式、结论或步骤均不自动计覆盖。
+4. 无该日快存或无证据支持练习目标时说明实际情况，不能借其他日期的旧弱点凑题。
 
-Finish selection and prepare the whole question set before the learner starts. During learning, use the shared question-worker and wrong-intake path for every actual question. Record complete raw Capture evidence only; formal scores, long-term scheduling, mastery, indexes and publication belong to later user-authorized formal intake.
+沿同版已接受概况核具体动作。旧概况失效或缺来源时回核前一日已接受的原话和观察，不把 `semantic_stale` 或仅有通用教材的 `evidence_digest_only` 当成薄弱点结论。概况维护后的新版本可改变下一检查，选题仍依实际题面和当天正式证据；已有题单按原身份和实际进度继续。
 
-## Project C daily execution
+## 找题和验选
 
-Already imported external_project_c sources keep their original provenance. Call show-review-source once at actual startup, then reuse the verified queue, original images and precomputed per-question profiles. Do not repeat selection or inspect all source code between questions. Every finished actual item, correct or incorrect, goes directly to wrong-intake with its delivered formal ID, queue/item and complete current conversation. No score event is required. Preserve first answer, hints, corrections, available artifacts and the displayed write-up as raw evidence. A user's reported score is saved as their statement, not immediately applied to the schedule. B generated review exercises retain their separate evidence route.
+读[考法参照、题池和验选合同](references/exam-priority-five.md)。使用现有题库、错题库及 scheduler：
 
-## Canonical Entry
+- 用 2020–2026 数一、数二、数三原题和解析查常考解法。至少对同一动作检索其他原题，核对解决对象、条件、步骤怎么接、设问有何变化；同卷跨卷同题、共享小问、题目和自身都不能证明复现。优先有独立真题复现的路线，确实只有单份依据时说明证据限度。
+- 核每项覆盖对应的小问、对象、条件、设问和必须完成的动作。按考频查尚未覆盖的具体卡点。综合题可合并多个实际卡点，已会动作标为随题使用。只用到已会动作的题不入选，做完已会的前一步也不能替代对后续卡点的训练。
+- 优先找符合近年考法的合格真题。书面比对后可用已核原卷的旧题复现近年同一考法。数一须核同一道题的真实作答。数二三共用题、错题卡另编号和已确认共用小问同样检查数一身份。题面或解析接触只用于间隔检查。
+- 先核合格真题能覆盖哪些高频卡点，再为仍有缺口的卡点查错题库，必要时查本地原版练习。覆盖范围相同时，先让真题覆盖更多优先卡点，再压缩题数。练习题入选须补一个合格真题未承担的考法。逐题记录补题的真题出处、相同动作和关键差别。缺口无法解决时如实报告。用户给明确上限才设上限。
+- 所有交付题按目标日与最近真实接触计算完整天数：不足 10 天禁止，满 10 天可候选。近期已展示的同题也算接触；已知有接触却日期不明时核原件，不猜日期。无记录仅表述为系统未查到记录；这个状态不能通过数一的已做证明。保持整题无提示独立正确的现行排除。
 
-Work from `/Users/your-user/Documents/kaoyan-math`. The real entry is the repository scheduler, never a script claimed to live inside this Skill:
+运行 `scheduler.py warmup-candidates --date D --coverage --output 已核T9候选包`。从该日证据写语义计划，再用 `warmup-successor --date D --coverage --candidate-bundle 候选包 --semantic-plan 私有计划 --output 已核T9结果` 验证。两条命令都可附同一个明确的 `--count` 上限。`validated_shortfall` 需先继续核缺项的实际候选，再带缺口原因交付。仅预览按请求停在所需阶段。普通模式由当前代理串行完成。
 
-```bash
-python3 数学一回滚复习系统/scripts/scheduler.py --help
-python3 数学一回滚复习系统/scripts/scheduler.py warmup-candidates --help
-python3 数学一回滚复习系统/scripts/scheduler.py warmup-successor --help
-```
+## 交付和续做
 
-Before creating or replacing a queue, read `references/semantic-selection-v5.md`. Use the current local date unless the user supplies another date.
+公开清单只给目标日期、题号、出处和安全原题，答案、断点及私有参照关系留后台。备题可用既有当前学习队列标 `prepared_not_studied`；不增加学习、曝光、评分或调度事件。[T9 规则](../kaoyan-math-enhancement-intake/references/t9-intermediates.md)适用于私有计划与验证产物。
 
-The old `warmup` queue and its public/internal files remain historical evidence. Do not overwrite, delete, or silently reuse an old queue when a new semantic selection is required.
-
-## Evidence-stage Schedule
-
-The scheduler resolves the configured window from the latest real learning activity and the evidence stage. The default first-version windows are deliberately ranges rather than claims of one scientifically exact interval:
-
-| Current evidence stage | Default due window after latest real activity |
-|---|---:|
-| Wrong, unable to start, or corrected but not independently verified | 1-2 days |
-| First no-hint independent correct result | 5-10 days |
-| Second no-hint independent correct result | 18-35 days |
-| Third no-hint independent correct result | 40-75 days |
-| Repeatedly stable but retained for long-term maintenance | 75-120 days |
-
-Use the scheduler's versioned configuration and make only bounded adjustments for the target examination date and remaining retention horizon. Do not prompt-engineer a fixed `1, 7, 31` schedule.
-
-An activity date must come from documented contact with the real question: delivery or viewing, an attempt, an error, a redo, hint or solution exposure, or a formal learning result that records that interaction. File modification time, ingestion time by itself, Wiki or graph rebuild, relation maintenance, index refresh, and synchronization are not learning activity.
-
-These windows determine when a gap anchor or repair deserves attention. They never override the delivered-card Day 0-7 gate.
-
-## Two Separate Lanes
-
-For an unresolved original card, the scheduler may expose a short repair lane:
-
-```bash
-python3 数学一回滚复习系统/scripts/scheduler.py same-item-repair \
-  --date YYYY-MM-DD \
-  --output /private/tmp/math-same-item-repairs-YYYY-MM-DD.json
-```
-
-`same_item_repair` may return the original card after 1-2 days, but it is not one of the daily five, not a transfer check, and not evidence that the surrounding knowledge point is stable merely because the repeated route is fluent.
-
-The daily queue instead tries to test transfer with another eligible formal old card. A recent original card may be a private anchor, but it must never be an actual daily delivery during Day 0-7.
-
-## Hard Day 0-7 Delivery Gate
-
-For target day `D`, exclude an actual `delivered_card_id` if any real learning activity for that card occurred from `D-7` through `D`, inclusive. Day 8 is the first eligible delivery day.
-
-For example, on 2026-08-28, activity from 2026-08-21 through 2026-08-28 excludes the card; 2026-08-20 is the newest potentially eligible activity date. A recent card can only anchor a search for another old card outside the gate. Never use a recent card to reach the requested count; return fewer items.
-
-## Queue Selection And Commit
-
-First export the deterministic eligible range:
-
-```bash
-python3 数学一回滚复习系统/scripts/scheduler.py warmup-candidates \
-  --date YYYY-MM-DD \
-  --count 5 \
-  --output /private/tmp/math-warmup-candidates-YYYY-MM-DD.json
-```
-
-This step owns only configured stage windows, activity dates, Day 0-7 exclusion, formal identity, source version and hashes, permanent exclusions, deduplication, allowed roots, and the bounded candidate range. It must not use structured semantic labels to pick or rank the final five.
-
-Then perform the native reader and parent verification protocol in `references/semantic-selection-v5.md`. The native reader must actually read the raw allowed candidate evidence and its result must decide or materially change the semantic ordering. It is invalid to let Python preselect five and ask Luna to endorse them.
-
-After the parent reopens every cited selected byte and completes the fail-closed semantic plan, serialize the successor:
-
-```bash
-python3 数学一回滚复习系统/scripts/scheduler.py warmup-successor \
-  --date YYYY-MM-DD \
-  --count 5 \
-  --candidate-bundle /private/tmp/math-warmup-candidates-YYYY-MM-DD.json \
-  --semantic-plan /private/tmp/math-warmup-semantic-plan-YYYY-MM-DD.json \
-  --supersedes-queue-id WQ-EXACT-OLD-QUEUE-ID
-```
-
-When replacing a queue, use the exact existing queue ID. Never fabricate it or edit old manifests/logs to bypass idempotency. If no prior queue exists, follow the current `warmup-successor --help` new-queue contract rather than inventing a superseded queue.
-
-For `预览`, `只看候选`, or `不要记录`, stop after candidate export, the required native semantic read, and parent hash verification. Do not run `warmup-successor`.
-
-If the reader fails, is decorative, exceeds scope, or lacks hash-bound evidence, discard the result. Retry only with the same bounded eligible set or stop. Never widen the date gate, admit an informal card, fall back to Python semantic ranking, or pad the queue.
-
-## Explicit Knowledge-point Evidence
-
-`warmup-candidate-bundle-v2` also exports `concept_evidence` as a paged workflow collection and `concept_evidence_contract` with scope, omitted keys and hashes. Each included point contains all saved events, observations and dialogue; never describe a bounded subset as complete global coverage. A stale index or changed source requires refresh, not a card-only fallback.
-
-Use `anchor_id` for every anchor. A formal-card anchor additionally has a real `formal_id`; a `concept_review` anchor has `concept_key` and all `source_refs`, without a fake formal ID. Both independent review sessions and explicitly formalized point observations can supply the anchor. Wrong, unresolved and hint-corrected evidence enters the unstable window and must influence semantic priority. Correctness at a point never permanently excludes its related formal cards or creates card-level activity.
-
-Use `warmup-semantic-plan-v3` and actual `reader_execution` for a selected concept anchor. Read its complete included events and source bytes, compare eligible old cards semantically, and reopen every source reference plus the selected card hash. The internal queue preserves the concept as `selection_anchor`; its scoring anchor and unit identify only the actual delivered formal card. Never advance a related original card or bulk-edit due dates from a point-level result.
-
-Project C imports use `math-review-source-v2`, `selection_basis` and per-question `anchor_id` as specified in the reference. Older C sources remain readable; an old source that omits newer relevant concept facts must refresh before a new import.
-
-## Semantic Value Order
-
-Select only formal old cards and prefer, in order:
-
-1. The same concrete wrong point or first method break.
-2. The same fine-grained knowledge point.
-3. An evidence-backed confusable method or condition boundary that tests discrimination.
-
-Avoid redundant cards when another eligible card adds a stronger transfer check. The native reader compares those meanings from raw evidence; deterministic code does not infer them from tags. The parent retains the final judgment after reopening the same hashes.
-
-## Answer Protection
-
-Before the attempt, never publish an answer, standard solution, `wrong_point`, `method_gap`, private anchor reason, or any wording that reveals the needed method or lets the answer be inferred.
-
-Use only each selection's reviewed `public_value_reason` to explain value. The public queue supplies identity and source, not necessarily a safe problem surface. Mark an unverified item `question_surface_pending`. Show a visual only when it is explicitly verified question-only.
-
-## Per-item Links
-
-Show every actual `delivered_card_id` as its own clickable Obsidian-opening entry. Never link the private anchor ID.
-
-Resolve without opening an answer-bearing destination:
-
-1. Use `http://127.0.0.1:8765/open/FORMAL_ID` when the verified bridge snapshot contains the delivered ID and the bridge is listening.
-2. Otherwise use a URL-encoded `obsidian://open?vault=kaoyan-math&file=...` when the vault-relative path is verified.
-3. Otherwise use a local-file link and state that no verified Obsidian route was available.
-
-The visible label may use only public queue fields. Do not enrich it from private evidence or answer-bearing titles.
-
-## Permanent Independent-correct Exclusion
-
-Once an actual delivered formal card has verified no-hint independent-correct evidence, never deliver that card again in any warmup mode. It may remain a private anchor for finding a different never-correct card.
-
-Canonical scores 4-5 trigger this exclusion. Score 3 alone does not, because it may be hint-assisted. Legacy text counts only when it explicitly proves whole-question no-hint, independent, or closed-book completion, or records the user's explicit statement that the current problem was independently correct. Partial, hint-assisted, inferred, or independence-unverified evidence cannot exclude the card.
-
-## Verified Project C Delivery
-
-For a source already imported through the Bridge, use its actual `run_id` with `scheduler.py show-review-source --run-id RUN_ID --date YYYY-MM-DD`. This verifies the registered original question hashes, creates the protected question display and appends one delivery to the existing warmup ledger. Show the returned exact original question paths. A `DISPLAY_READY` result is delivery preparation, never an answer or score. Do not expose the separate solution files or private reason.
-
-Project C retains `external_project_c` provenance and its exact queue/item/run/commit identities. Keep these in the complete Capture and its source identity. During learning do not call `record-review-outcome`, `score-warmup`, `score` or postcommit, and do not add `--formal-intake` to bypass the Capture route. An older package's immediate-scoring instruction is superseded by this current workflow.
-
-## Per-question Fast Capture
-
-The authorized morning learning workflow includes saving each finished actual item, regardless of correctness. A request to keep going or quickly save does not authorize formal scoring. A read-only preview or a request not to save still controls its own scope.
-
-Hand wrong-intake the actual delivered formal ID, existing attempt if any, current session/log, exact question-start message, date, queue/item, all available artifacts and the displayed write-up position. Use `capture_current_math.py` directly; if boundaries are missing, one `prepare` then one save. Pass `--queue-id QUEUE_ID --item-id QUEUE_ITEM_ID` without creating a score event. Never replace the delivered ID with the selection anchor.
-
-After `recorded` or `noop`, `formal_write_count=0` and `score_write_count=0`, give the short saved receipt and show the next prepared question in the same turn when requested. Do not reopen packages, inspect scorers, refresh profiles or publish between questions. Reuse already verified question assets, links and unchanged profiles.
-
-If an older event was already formally scored, preserve it and reuse the existing Capture/attempt; do not rescore or resave a completed item. A missing legacy score link is handled in formal intake or an explicitly requested repair, never by a source-code investigation during learning.
-
-Later formal intake reads the complete pending Captures, checks any existing formal events to prevent duplication, and adjudicates scores, hint dependence, scheduling and knowledge-point updates together. Use enhancement-intake for a supplied A return, or nightly-qa for the authorized raw backlog.
-
-## Quiet Learning Celebration
-
-After verifying that the user's current answer correctly completes the current question or the explicitly checked subquestion, call the official Codex confetti tool once: `tools.mcp__codex_app__fire_confetti({})` through `functions.exec` (tool owner: `mcp__codex_app`). Both independent and hint-assisted correct answers qualify; celebration never upgrades independent mastery or authorizes a score, intake, or other learning write.
-
-Do not fire for an incorrect or partly correct checked answer, an unchecked intermediate step, an explanation or closure alone, historical evidence, an audit fixture, or a replay. Keep answer protection and existing scoring/navigation rules. Deduplicate the same answer across retries and handoffs. If the tool is unavailable or its result is not `fired: true`, continue without claiming it fired; do not create a replacement script or retry the effect for that answer.
-
-This Skill owns celebration for delivered warmup items, including an explicitly checked subquestion; a handoff to `kaoyan-math-question-worker` must not fire again. Deduplicate by the delivered item/subquestion and actual answer turn, using the stable `score_event_id` and `attempt_id` when already available. A score noop or replay is not a new answer; never create a score just to trigger confetti.
-
-## Completion
-
-Report the target date, actual count, new queue ID and exact superseded queue ID when applicable. For every delivered card report its public source, answer-safe entry, question-surface status, answer-safe value reason, and the latest verified real activity date proving it is outside Day 0-7.
-
-Also report the candidate-bundle hash, the real native reader ID and observed execution metadata, and that the parent reopened the cited hashes. Do not expose the semantic plan's private reasons or private anchor evidence.
-
-Stop with fewer than five rather than padding. Stop before exposing an unsafe surface. Stop before a write if exact queue identity, actual native semantic execution, same-byte Sol verification, or successor idempotency cannot be proven.
-
-## Teaching, Current State And External Sources
-
-The current root controls native engineering delegation without a fixed model/count/effort/fork/service tier. Never fabricate a legacy Luna proof to satisfy an older schema. Keep legacy queue receipts immutable; use only the currently supported input schema and source label. An external project-C selection must have its own provenance, exact source_commit and independent local eligibility checks; it is not a native-reader execution or a fabricated predecessor.
-
-During the learner's actual question, use question-worker's current user-selected DeepSeek-V4.1-Flash entry and 10–20-second substantive-feedback target and single best exam method. Reuse the prepared related profile without letting old errors override correct current work. Teaching and Capture finish before formal intake; no formal postcommit runs on this real-time path. Preserve Day0-7, permanent independent-correct exclusion, the same-item repair lane, hint distinctions, and all public/private answer boundaries.
+已开始的队列保持原身份、题序和进度。未开始的旧清单在下一次实际重选时按新规则核对，保留旧稿并标替换关系。只有恢复旧十题或早期五题的原合同才读 [旧队列说明](references/legacy-mixed-ten.md)。明确开始后按真实题号进入 question-worker，首答前只给安全题面。讲到当前题获准的提示、思路或答案时，按[左右分栏交付](../kaoyan-math-question-worker/references/sidebar-delivery.md)打开本题左页，右侧给文字、原生公式和链接。明确保存或切题才走 wrong-intake；准备未等于学习。

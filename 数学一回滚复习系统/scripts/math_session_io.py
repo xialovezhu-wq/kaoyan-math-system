@@ -13,6 +13,28 @@ INDEX_SCHEMA = 1
 GUARD_BYTES = 4096
 
 
+def current_codex_path(value, home, *, from_app_state=False):
+    """Rebase known app namespaces without rewriting an original transcript.
+
+    threads.rollout_path and image wrappers can retain a previous machine's
+    absolute home. Exact relative app locations remain meaningful after copy;
+    arbitrary external attachments remain explicit paths, never fuzzy matches.
+    """
+    path, home = Path(value), Path(home).expanduser().resolve()
+    if not path.is_absolute() or ".." in path.parts or path.is_relative_to(home):
+        return path
+    namespaces = {"sessions", "archived_sessions", "attachments", "visualizations"}
+    for position, part in enumerate(path.parts):
+        if part not in namespaces:
+            continue
+        standard = position > 0 and path.parts[position - 1] == ".codex"
+        state_log = (from_app_state and part in {"sessions", "archived_sessions"}
+                     and path.name.startswith("rollout-") and path.suffix == ".jsonl")
+        if standard or state_log:
+            return home.joinpath(*path.parts[position:])
+    return path
+
+
 class SessionIndexError(ValueError):
     """The rollout cannot be read through a verified incremental index."""
 
@@ -234,13 +256,13 @@ class SessionIndex:
             ).fetchone()
         return row[0] if row else None
 
-    def messages(self, limit: int = 10) -> list[dict[str, Any]]:
+    def messages(self, limit: int = 10, end_line: int | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 100))
         with self._read_connect() as connection:
             rows = connection.execute(
                 "SELECT line_no,role,preview,block_types FROM messages "
-                "WHERE visible=1 ORDER BY line_no DESC LIMIT ?",
-                (limit,),
+                "WHERE visible=1 AND line_no <= ? ORDER BY line_no DESC LIMIT ?",
+                (self.line_count if end_line is None else end_line, limit),
             ).fetchall()
         return [
             {"line": row[0], "role": row[1], "preview": row[2], "blocks": json.loads(row[3])}

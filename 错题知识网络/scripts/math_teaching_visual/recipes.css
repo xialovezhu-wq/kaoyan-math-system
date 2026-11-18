@@ -34,3 +34,8 @@
   #__ROOT_ID__ .recipe-matrix { font-size: .76em; border-spacing: 1px; }
   #__ROOT_ID__ .recipe-caption { font-size: .83em; }
 }
+#__ROOT_ID__ .recipe-question { margin-block: .8rem; }
+#__ROOT_ID__ .recipe-question summary { cursor: pointer; font-weight: 600; }
+#__ROOT_ID__ .recipe-question label { display: block; }
+#__ROOT_ID__ .recipe-question textarea { box-sizing: border-box; width: 100%; margin-block: .35rem; font: inherit; }
+#__ROOT_ID__ .recipe-question [role="status"] { margin-inline-start: .5rem; }

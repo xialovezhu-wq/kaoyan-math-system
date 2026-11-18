@@ -6,6 +6,8 @@ import json
 import re
 import sqlite3
 
+from math_teaching_scope import part_scope, summary_role
+
 
 VISUAL_ENTRY = "错题知识网络/scripts/math_teaching_visual.py"
 ELIGIBLE_STEP_STATES = {"current", "source_changed", "partial_after_correction",
@@ -22,9 +24,14 @@ def exact_observation(repo, result, key, operation):
         return {"status": "not_bound_to_formal_question"}
     # The existing locator checks an explicit subquestion in annotations; a
     # mere concept/date match in a multi-part question still needs inspection.
-    sub = re.search(r"第[（(]?([一二三四五1-5])[）)]?(?:小)?问", operation or "")
+    parts, excluded = part_scope(operation)
+    if not parts and excluded:
+        return {"status": "requested_subquestion_unresolved"}
+    if len(parts) > 1:
+        return {"status": "multiple_subquestions_require_separate_scope"}
+    sub = next(iter(parts), None)
     scope = {"status": "resolved", "exact_identity": True, "formal_ids": [formal],
-             "personal_requested": True, "subquestion": sub.group(1) if sub else None}
+             "personal_requested": True, "subquestion": sub}
     try:
         found = locate(repo, [key], scope=scope, view=result["view"], expected_version=version,
                        teaching_annotation=True, max_bytes=7500, limit=2)
@@ -44,13 +51,15 @@ def exact_observation(repo, result, key, operation):
     locators = [{f: source.get(f) for f in ("path", "sha256")} for source in sources[:1]]
     observations = []
     for atom in newest.get("observations", []):
+        if sub and atom.get("subquestion_binding") != "explicit":
+            continue
         row = {k: atom[k] for k in ("outcome", "accepted_annotation", "hint_precedes_user", "subquestion_binding")
                if k in atom}
         for field in ("user_sequences", "hint_sequences"):
             row[field] = sorted(set(atom.get(field, [])))
         observations.append(row)
     if not observations:
-        return {"status": "no_bounded_observation"}
+        return {"status": "subquestion_not_verified" if sub else "no_bounded_observation"}
     return {"status": "available", "role": "past_exact_question_observation",
             "formal_id": formal, "study_date": newest.get("study_date"),
             "annotation_status": "view_restricted" if result["view"] != "direct" else
@@ -94,7 +103,14 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
         prefix = f"/records/{index}/"
         # Even a current concept summary can describe another question or an
         # earlier step. A matching point never proves a current attempt.
-        if row_status == "semantic_current" and row.get("short_summary"):
+        role = row.get("summary_role") or summary_role(row.get("short_summary"))
+        if role == "scoped_result_withheld":
+            point["personal_history_status"] = role
+        elif role == "reference_only_no_attributed_attempt":
+            point["personal_history_status"] = "no_attributed_attempt_in_summary"
+        elif role == "other_questions_named_in_concept_history":
+            point["other_question_history"] = prefix + "short_summary"
+        elif row_status == "semantic_current" and row.get("short_summary"):
             point["concept_prior"] = prefix + "short_summary"
             if row.get("next_check"):
                 point["candidate_check"] = prefix + "next_check"
@@ -147,6 +163,11 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
                     return {**row, "exam_brief": brief}
             return row
 
+        memory = value.get("memory_context")
+        if isinstance(memory, dict):
+            # The role/index maps only repeat paths to the actual evidence in
+            # this very response. Keep conflict, freshness and history records.
+            value = {**value, "memory_context": {k: v for k, v in memory.items() if k not in {"roles", "levels"}}}
         rows = value.get("records", [])
         top = brief_refs(value)
         if not top and any(row.get("problem_solving") for row in rows):
@@ -201,7 +222,13 @@ def teaching_inputs(result, max_bytes, *, repo=None, operation=None, known_versi
         if recipe:
             decision["study_recipe"] = recipe
             if len(encoded(value)) > max_bytes:
+                value = compact_before_omitting(value)
+            if len(encoded(value)) > max_bytes:
                 decision.pop("study_recipe")
+        if add_exact and not protected and not temporal.get("valid_at") and not temporal.get("known_at"):
+            decision["ipad_3d"] = "--tutor-presentation three_d"
+            if len(encoded(value)) > max_bytes:
+                decision.pop("ipad_3d")
         if isinstance(result.get("version"), str):
             version = hashlib.sha256(encoded(["math-teaching-roles-v1", result["version"], decision])).hexdigest()
             if len(encoded({**value, "version": version})) <= max_bytes:

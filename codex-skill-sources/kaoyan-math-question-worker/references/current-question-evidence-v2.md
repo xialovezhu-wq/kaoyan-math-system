@@ -9,10 +9,12 @@ Use this reference when a current-question tutoring turn must hand evidence to w
 ```text
 formal_id: exact formal ID / unresolved
 question_surface: current stem and conditions actually supplied
-current_work: current answer / derivation / first action / not recorded
+current_work: first visible learner attempt with its source turn, or not observed
 confirmed_correct_steps: independently observed facts only
 first_break: earliest kind + text + current provenance
-hints_given: assistant-provided help in this episode
+hints_given: assistant hints/explanations in turn order
+subsequent_work: later learner revisions with their preceding hints, or not observed
+corrections: effective condition, source and predecessor when known; unresolved ties stay explicit
 answer_protection: protected / direct-answer-authorized
 score_queue_identity: score + basis + receipt + queue ID + queue item ID + delivered ID + mode, when proven
 ```
@@ -32,9 +34,9 @@ Never convert `assistant_explained` into independent mastery evidence.
 
 ## Handoff Rules
 
-1. A warmup result report permits exact scoring only.
-2. Explicit 入库、更新、记录复发、标记掌握 permits the wrong-intake fast-capture route.
-3. Explicit 现在立即完整入库 permits immediate full closeout.
+1. Ordinary tutoring and current morning queues preserve actual work without scoring. Reuse a pre-existing score receipt only when its queue, item and delivered ID match; a self-report is not authorization for a new score.
+2. An explicit quick-save request, or an explicit end/next instruction in an authorized save-per-question queue, transfers actual turns and available attachments to wrong-intake. Preserve self-reports as self-reports.
+3. An explicit formal intake request goes to nightly-qa or local enhancement-intake, including an actual legacy A return.
 4. A tool parameter, candidate selection, or inferred user intent never substitutes for authorization.
 5. Keep large stems, images, solutions, and handwriting at their original source paths; pass roles and stable paths rather than duplicating their contents.
 6. Raw archive reopening is read-only and exact-locator-only. Verify the archive before reading and keep archived assistant turns separate from user-observed evidence.

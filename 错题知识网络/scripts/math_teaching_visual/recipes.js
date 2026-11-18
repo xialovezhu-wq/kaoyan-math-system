@@ -237,6 +237,58 @@ const CodexMathStudyRecipes = (() => {
     };
     host.append(el("p", "同一曲面 z = x² − y²，观察点 (0, 0, 0)。曲面网格为绘图近似，截线和切平面公式为精确关系。",
       "recipe-caption"));
+    const detail = el("details", undefined, "recipe-question");
+    const reason = el("p");
+    const questionLabel = el("label", "想追问的地方");
+    const question = el("textarea");
+    question.rows = 2;
+    question.maxLength = 1000;
+    question.value = "这个截面怎样帮助我判断原点是否为极值？";
+    questionLabel.append(question);
+    const manual = el("textarea");
+    manual.setAttribute("aria-label", "可手动复制的场景状态与问题");
+    manual.readOnly = true;
+    manual.hidden = true;
+    const copyStatus = el("span");
+    copyStatus.setAttribute("role", "status");
+    const instance = id + "-" + Array.from(crypto.getRandomValues(new Uint32Array(3))).join("-");
+    let stateVersion = 0, previousParameters = "";
+    function parameters() {
+      return {...scene.parameters, section, azimuth, pitch, overlay_checked: plane.checked,
+        tangent_visible: section === "tangent" || plane.checked};
+    }
+    function clearCopy() {
+      manual.hidden = true;
+      manual.value = "";
+      copyStatus.textContent = "";
+    }
+    question.addEventListener("input", clearCopy);
+    const copy = button("复制当前状态和问题", async () => {
+      if (!question.value.trim()) { question.focus(); return; }
+      const snapshot = {schema: "math-scene-question-v1", scene_id: scene.recipe_id,
+        scene_version: scene.scene_version, instance_id: instance, state_version: stateVersion,
+        scope: scene.teaching_scope || {view: "synthetic_reference"},
+        parameters: parameters(), user_question: question.value, authority: "display_state_only"};
+      const body = JSON.stringify(snapshot, null, 2);
+      manual.value = body;
+      try {
+        await navigator.clipboard.writeText(body);
+        if (manual.value === body) copyStatus.textContent = "已复制当前状态和问题。";
+      } catch {
+        if (manual.value !== body) return;
+        manual.hidden = false;
+        manual.focus();
+        manual.select();
+        copyStatus.textContent = "已选中这份状态，可手动复制。";
+      }
+    });
+    detail.append(el("summary", "这一步为什么？"), reason, questionLabel, copy, copyStatus, manual);
+    host.append(detail);
+    const reasons = {
+      x0: "令 x = 0，任取足够小的非零 y，都有 −y² < 0 = f(0,0)。所以原点不可能是局部极小点。",
+      y0: "令 y = 0，任取足够小的非零 x，都有 x² > 0 = f(0,0)。所以原点不可能是局部极大点。",
+      tangent: "可微函数在定义域内点取得局部极值时，梯度必为零。本例的水平切平面满足这个必要条件；两个轴向截面的函数值却一高一低，因此逆命题不成立。"
+    };
     function render(announce = true) {
       const c = Math.cos(azimuth * rad), s = Math.sin(azimuth * rad),
         cp = Math.cos(pitch * rad), sp = Math.sin(pitch * rad);
@@ -270,6 +322,15 @@ const CodexMathStudyRecipes = (() => {
       yaw.value = azimuth;
       tilt.value = pitch;
       if (announce) note.textContent = relations[section];
+      const current = JSON.stringify(parameters());
+      if (previousParameters !== current) {
+        previousParameters = current;
+        stateVersion++;
+        host.dataset.stateVersion = String(stateVersion);
+        host.dataset.instanceId = instance;
+        reason.textContent = reasons[section];
+        clearCopy();
+      }
     }
     svg.addEventListener("pointerdown", event => {
       active = [event.clientX, event.clientY, event.pointerId];

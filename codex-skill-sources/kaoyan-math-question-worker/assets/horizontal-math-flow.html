@@ -1,0 +1,89 @@
+<div id="__FLOW_ID__" aria-label="__TITLE__">
+  <div class="flow-heading">__TITLE__</div>
+  <div class="flow-steps" role="group" aria-label="从左到右选择步骤">__BUTTONS__</div>
+  <div class="flow-frame">
+    <section class="card" id="__FLOW_ID__-detail" role="region" aria-live="polite" aria-atomic="true" aria-labelledby="__FLOW_ID__-title">
+      <div class="flow-content">
+        <h3 id="__FLOW_ID__-title">__FIRST_TITLE__</h3>
+        <div class="flow-body">__FIRST_BODY__</div>
+      </div>
+    </section>
+  </div>
+  __PANELS__
+</div>
+<style>
+  #__FLOW_ID__ { width: 100%; color: var(--foreground); }
+  #__FLOW_ID__ .flow-heading {
+    margin-bottom: calc(var(--font-size-base) * 1.3);
+    padding-inline-end: calc(var(--font-size-base) * 6.5);
+    font-weight: 500;
+  }
+  #__FLOW_ID__ .flow-steps {
+    display: grid;
+    grid-template-columns: __COLUMNS__;
+    align-items: center;
+    column-gap: calc(var(--font-size-base) * .55);
+  }
+  #__FLOW_ID__ .flow-arrow { color: var(--muted-foreground); pointer-events: none; }
+  #__FLOW_ID__ .flow-frame {
+    display: grid;
+    height: calc(var(--font-size-base) * 23);
+    margin-top: calc(var(--font-size-base) * 1.25);
+  }
+  #__FLOW_ID__ .flow-content,
+  #__FLOW_ID__ .flow-body {
+    display: grid;
+    align-content: start;
+    gap: calc(var(--font-size-base) * 1.2);
+    min-width: 0;
+  }
+  #__FLOW_ID__ .formula-group {
+    display: grid;
+    gap: calc(var(--font-size-base) * .6);
+    min-width: 0;
+  }
+  #__FLOW_ID__ math[display="block"] { margin: 0; text-align: left; }
+  #__FLOW_ID__ .flow-note { color: var(--muted-foreground); }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('__FLOW_ID__');
+  const buttons = Array.from(root.querySelectorAll('.flow-steps button'));
+  const panels = Array.from(root.querySelectorAll('template'));
+  const title = root.querySelector('h3');
+  const body = root.querySelector('.flow-body');
+
+  function selectStep(index, save) {
+    if (!Number.isInteger(index) || index < 0 || index >= panels.length) return;
+    buttons.forEach((button, i) => button.setAttribute('aria-pressed', String(i === index)));
+    title.textContent = panels[index].dataset.title;
+    body.replaceChildren(panels[index].content.cloneNode(true));
+    if (save && window.openai?.setWidgetState) {
+      window.openai.setWidgetState({
+        modelContent: {visualization: '__FLOW_ID__', selectedStep: index + 1},
+        privateContent: {visualization: '__FLOW_ID__', selectedStep: index + 1}
+      }).catch(() => {});
+    }
+  }
+
+  function restore(state) {
+    const saved = state?.privateContent;
+    if (saved?.visualization === '__FLOW_ID__') selectStep(saved.selectedStep - 1, false);
+  }
+
+  buttons.forEach((button, index) => {
+    button.addEventListener('click', () => selectStep(index, true));
+    button.addEventListener('keydown', event => {
+      let next;
+      if (event.key === 'ArrowRight') next = Math.min(index + 1, buttons.length - 1);
+      else if (event.key === 'ArrowLeft') next = Math.max(index - 1, 0);
+      else return;
+      event.preventDefault();
+      buttons[next].focus();
+      selectStep(next, true);
+    });
+  });
+  restore(window.openai?.widgetState);
+  window.addEventListener('openai:set_globals', event => restore(event.detail?.globals?.widgetState));
+})();
+</script>

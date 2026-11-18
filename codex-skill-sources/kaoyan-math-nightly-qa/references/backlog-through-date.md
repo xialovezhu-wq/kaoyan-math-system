@@ -4,7 +4,7 @@
 
 The ordinary formal trigger is cumulative. Compute `cutoff_date` in `Asia/Shanghai`, then run the read-only `quick_intake.py backlog-through-date --cutoff-date YYYY-MM-DD` entry. Its `plan` is canonical JSON and `plan_sha256` binds the exact ledger snapshot, selection, original dates, classifications and execution contract.
 
-Only `--only-today` or explicit repeated `--capture-id` / `--package-id` arguments may narrow the cumulative set. Future captures are excluded and reported separately.
+For the short daily command in [nightly-qa](../SKILL.md), pass `--only-today` with that fixed Shanghai date. The same flag applies to an explicit today-only request. Exact subsets use repeated `--capture-id` / `--package-id`. An otherwise unqualified cutoff remains cumulative. Future captures are excluded and reported separately.
 
 ## Per-Date Barrier
 

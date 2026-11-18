@@ -22,7 +22,8 @@ STUDY_ASSETS = Path("错题知识网络/assets/math-study-recipes")
 RECEIPT_SCHEMA = "math_study_recipe_assets_v1"
 STUDY_VIEWS = {"after_attempt", "direct"}
 STUDY_MATCH = {
-    "saddle-sections-tangent": re.compile(r"鞍面|鞍点|截线.*切平面|切平面.*截线"),
+    "saddle-sections-tangent": re.compile(
+        r"鞍面|鞍点|截线.*切平面|切平面.*截线|(?:驻点|梯度为零).{0,8}(?:一定|未必|是否|必然|推出).{0,5}极值"),
     "eigen-directions": re.compile(r"零特征值|特征方向|特征向量.*(?:共线|反向|零向量)"),
     "same-distribution-vs-independence": re.compile(r"(?:同分布|边缘分布).*独立|独立.*(?:同分布|边缘分布)"),
     "riemann-signed-area": re.compile(r"有符号黎曼和|(?:黎曼和|中点和|中点法).*(?:正负|有符号|几何面积)|定积分.*几何面积.*(?:抵消|正负|逆限)"),
@@ -384,6 +385,8 @@ def render(scene, *, question, focus, view="protected", allow_geometry=False,
     if recipe:
         require(checked_study_recipe(REPO, approved["recipe_id"], view) is not None,
                 "study recipe dependencies or asset changed; return to text")
+        if approved["recipe_id"] == "saddle-sections-tangent":
+            approved = {**approved, "teaching_scope": {"question_id": question, "focus": focus, "view": view}}
     local = (_recipe_renderer(shared) if recipe else
              shared.LocalRenderer(ASSETS / "math.bundle.js", ASSETS / "math.css", "CodexMathVisual",
                                   frozenset({"region", "compare"})))

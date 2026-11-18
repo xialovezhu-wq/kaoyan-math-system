@@ -8,6 +8,23 @@ from math_tutoring_inputs import teaching_inputs
 
 
 class MathStudyRecipeTests(unittest.TestCase):
+    def test_stationary_counterexample_keeps_checked_scene_before_optional_ipad_hint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            visual.build_study_recipes(root)
+            native = {"view": "direct", "status": "available", "version": "v" * 64, "records": []}
+            operation = "驻点不一定是极值"
+            full = teaching_inputs(native, 4500, repo=root, operation=operation)
+            controls = full["teaching_inputs"]
+            self.assertEqual("saddle-sections-tangent", controls["study_recipe"]["id"])
+            self.assertIn("ipad_3d", controls)
+            controls.pop("ipad_3d")
+            budget = len(json.dumps(full, ensure_ascii=False, separators=(",", ":")).encode())
+            bounded = teaching_inputs(native, budget, repo=root, operation=operation)
+            self.assertEqual(controls["study_recipe"], bounded["teaching_inputs"]["study_recipe"])
+            self.assertNotIn("ipad_3d", bounded["teaching_inputs"])
+            self.assertIsNone(visual.suggest_study_recipe(root, operation, "protected"))
+
     def test_current_recipe_needs_permission_and_uses_only_fixed_parameters(self):
         selector = {"kind": "study_recipe", "recipe_id": "eigen-directions"}
         for view, allowed in (("protected", True), ("after_attempt", False)):

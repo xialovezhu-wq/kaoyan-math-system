@@ -1,4 +1,4 @@
 interface:
   display_name: "数学正式入库与原始包归档"
-  short_description: "原日期与唯一writer；最新个人资料及可恢复发布。"
-  default_prompt: "Use $kaoyan-math-nightly-qa for the authorized cumulative or exact set. Keep one serial formal writer, native root-directed read delegation, original dates, stable assets, Wiki/teaching-context gates and verified T9 archive. Preserve one reliable exam solution representation. Resume only missing postcommit refresh/publication or archive work after commit; do not replay formal writes or downgrade engineering to the tutoring-low task."
+  short_description: "日终正式入库并验回摘要、备次日高频题单、交付全日复习页。"
+  default_prompt: "使用 $kaoyan-math-nightly-qa，按上海日期完成今天数学快存的正式入库和摘要验回，备好次日高频题单并在左栏打开全日交互复习页，右侧附链接。已完成部分按回执续接。"

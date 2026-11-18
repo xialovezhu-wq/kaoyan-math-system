@@ -1,0 +1,101 @@
+<section id="__FLOW_ID__" aria-label="__TITLE__">
+  <div class="mapping-headings"><span>基本方法</span><span>解题过程</span></div>
+  <ul class="mapping-tree" role="list">__ROWS__</ul>
+</section>
+<style>
+  #__FLOW_ID__ {
+    --columns: minmax(0, 30%) 2.1rem minmax(0, 1fr);
+    --indent: .91rem;
+    --joint: .37rem;
+    --row-gap: .44rem;
+    --arrow-y: 1.31rem;
+    --branch-color: var(--border, currentColor);
+    --arrow-color: var(--muted-foreground, currentColor);
+    container-type: inline-size;
+    color: var(--foreground, currentColor);
+  }
+  #__FLOW_ID__ .mapping-headings,
+  #__FLOW_ID__ .mapping-row { display: grid; grid-template-columns: var(--columns); }
+  #__FLOW_ID__ .mapping-headings { margin-bottom: .45rem; font-weight: 500; }
+  #__FLOW_ID__ .mapping-headings > :last-child { grid-column: 3; }
+  #__FLOW_ID__ .mapping-tree,
+  #__FLOW_ID__ .mapping-tree ul { margin: 0; padding: 0; list-style: none; }
+  #__FLOW_ID__ .mapping-tree li {
+    --step-inset: calc(var(--indent) * var(--depth));
+    --branch-x: calc(var(--step-inset) - var(--indent) + var(--joint));
+    --branch-y: calc(var(--row-gap) + var(--arrow-y));
+    position: relative;
+    margin: 0;
+    padding: 0;
+  }
+  #__FLOW_ID__ .mapping-tree ul > li { padding-top: var(--row-gap); }
+  #__FLOW_ID__ .mapping-tree ul > li::before {
+    content: ""; position: absolute; top: 0; bottom: 0;
+    inset-inline-start: var(--branch-x); border-inline-start: 1px solid var(--branch-color);
+  }
+  #__FLOW_ID__ .mapping-tree ul > li:last-child::before { bottom: auto; height: var(--branch-y); }
+  #__FLOW_ID__ .mapping-tree ul > li::after {
+    content: ""; position: absolute; top: var(--branch-y); inset-inline-start: var(--branch-x);
+    width: calc(var(--indent) - var(--joint)); border-block-start: 1px solid var(--branch-color);
+  }
+  #__FLOW_ID__ .mapping-method {
+    display: flex; flex-direction: column; min-width: 0; padding-inline-start: var(--step-inset);
+  }
+  #__FLOW_ID__ .mapping-method > span {
+    display: flex; align-items: center; box-sizing: border-box; min-height: 2.7rem; padding: .38rem .57rem;
+    border: 1px solid var(--branch-color); border-radius: .35rem; overflow-wrap: anywhere;
+    background: var(--muted, transparent); color: var(--foreground, currentColor);
+  }
+  #__FLOW_ID__ .mapping-tree li:has(> ul) > .mapping-row > .mapping-method::after {
+    content: ""; flex: 1; margin-inline-start: var(--joint); border-inline-start: 1px solid var(--branch-color);
+  }
+  #__FLOW_ID__ .mapping-arrow {
+    position: relative; align-self: start; margin: var(--arrow-y) .23rem 0; height: 1px;
+    background: var(--arrow-color); color: var(--arrow-color);
+  }
+  #__FLOW_ID__ .mapping-arrow::after {
+    content: ""; position: absolute; inset-inline-end: 0; top: 50%; width: .35rem; height: .35rem;
+    border: solid currentColor; border-width: 1px 1px 0 0; transform: translateY(-50%) rotate(45deg);
+  }
+  #__FLOW_ID__ .mapping-process {
+    align-self: start; min-width: 0; border: 1px solid var(--branch-color); border-radius: .35rem;
+    background: var(--card, transparent); color: var(--card-foreground, currentColor);
+  }
+  #__FLOW_ID__ .mapping-process > summary {
+    display: grid; grid-template-columns: minmax(0, 1fr) .8rem; align-items: center; column-gap: .45rem;
+    min-height: calc(2.7rem - 2px); box-sizing: border-box; padding: .43rem .62rem;
+    list-style: none; border-radius: inherit; overflow-wrap: anywhere;
+  }
+  #__FLOW_ID__ .mapping-process > summary::-webkit-details-marker { display: none; }
+  #__FLOW_ID__ .mapping-process > summary:focus-visible { outline: 2px solid var(--ring, currentColor); outline-offset: 2px; }
+  #__FLOW_ID__ .mapping-chevron {
+    width: .39rem; height: .39rem; justify-self: center; margin-top: -.18rem;
+    border: solid var(--arrow-color); border-width: 0 1px 1px 0; transform: rotate(45deg);
+  }
+  #__FLOW_ID__ .mapping-process[open] .mapping-chevron { margin-top: .18rem; transform: rotate(225deg); }
+  #__FLOW_ID__ .mapping-detail {
+    display: grid; gap: .64rem; min-width: 0; padding: .6rem .62rem .66rem;
+    border-block-start: 1px solid var(--branch-color); overflow-wrap: anywhere;
+  }
+  #__FLOW_ID__ .mapping-section { min-width: 0; }
+  #__FLOW_ID__ .mapping-section h3 { margin: 0 0 .2rem; }
+  #__FLOW_ID__ .mapping-section p { margin: 0; min-width: 0; }
+  #__FLOW_ID__ .mapping-section p + p { margin-top: .22rem; }
+  #__FLOW_ID__ .mapping-text,
+  #__FLOW_ID__ .mapping-equation { display: block; min-width: 0; }
+  #__FLOW_ID__ .mapping-equation { max-width: 100%; padding-block: .08rem; overflow-x: auto; }
+  #__FLOW_ID__ .mapping-equation math[display="block"] { margin: 0; text-align: start; }
+  @container (max-width: 32rem) {
+    #__FLOW_ID__ .mapping-headings { grid-template-columns: auto 1fr; gap: .45rem; }
+    #__FLOW_ID__ .mapping-headings > :last-child { grid-column: auto; }
+    #__FLOW_ID__ .mapping-headings > :last-child::before { content: "→"; margin-inline-end: .45rem; }
+    #__FLOW_ID__ .mapping-row { grid-template-columns: minmax(0, 1fr); }
+    #__FLOW_ID__ .mapping-arrow {
+      width: 1px; height: .69rem; margin: .08rem 0 .24rem calc(var(--step-inset) + 1.1rem);
+    }
+    #__FLOW_ID__ .mapping-arrow::after {
+      top: auto; bottom: 0; inset-inline-end: 50%; transform: translateX(50%) rotate(135deg);
+    }
+    #__FLOW_ID__ .mapping-process { margin-inline-start: var(--step-inset); }
+  }
+</style>
